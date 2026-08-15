@@ -1,0 +1,46 @@
+name: seein
+
+services:
+  clickhouse:
+    # Current LTS line; receives 26.3 patch updates without jumping stable branches.
+    image: clickhouse/clickhouse-server:26.3
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: seein
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - ./data/clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  core:
+    # Keep the worker architecture explicit and reproducible on Docker Desktop.
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: docker/core.Dockerfile
+    ports:
+      - "8787:8787"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      DATA_ROOT: /data
+      QWEN_MCP_COMMAND: qwen-mm-plugins-blender
+      QWEN_MM_AUTOLAUNCH: "1"
+      QWEN_MM_CACHE: /data/qwen-cache
+      XDG_CACHE_HOME: /data/qwen-cache
+    volumes:
+      - ./data:/data
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    shm_size: "2gb"
