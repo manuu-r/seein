@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { z } from "zod";
 import type { Config } from "../config.js";
+import { boundsSize, recipeBounds } from "../scene/geometry-bounds.js";
 import {
   InspectionSchema,
   ResearchBriefSchema,
@@ -24,7 +25,12 @@ export interface WorkflowAI {
   researchAndPlan(prompt: string, maxObjects: number): Promise<ResearchPlan>;
   research(prompt: string): Promise<ResearchBrief>;
   plan(prompt: string, research: ResearchBrief, maxObjects: number): Promise<ScenePlan>;
-  inspect(manifest: SceneManifest, screenshotPath: string, spatial?: SpatialReport): Promise<Inspection>;
+  inspect(
+    manifest: SceneManifest,
+    screenshotPath: string,
+    spatial?: SpatialReport,
+    plan?: ScenePlan,
+  ): Promise<Inspection>;
 }
 
 export class GeminiWorkflowAI implements WorkflowAI {
@@ -112,7 +118,12 @@ Constraints:
     return validatePlan(ScenePlanSchema.parse(parseJsonResponse(result.text)), maxObjects);
   }
 
-  async inspect(manifest: SceneManifest, screenshotPath: string, spatial?: SpatialReport): Promise<Inspection> {
+  async inspect(
+    manifest: SceneManifest,
+    screenshotPath: string,
+    spatial?: SpatialReport,
+    plan?: ScenePlan,
+  ): Promise<Inspection> {
     const image = await fs.readFile(screenshotPath);
     const result = await this.ai.models.generateContent({
       model: this.config.GEMINI_INSPECTOR_MODEL,
@@ -121,7 +132,7 @@ Constraints:
           role: "user",
           parts: [
             {
-              text: `Inspect this rendered scene against its manifest and local spatial evidence. Geometry evidence is authoritative for bounds, framing, floating, and intersection; use the image for visual and semantic judgment. Choose at most one obvious, high-impact issue. Return pass/none when no safe correction is justified. Only request a patch allowed by the response schema. Manifest: ${JSON.stringify(manifest)} Spatial evidence: ${JSON.stringify(spatial ?? null)}`,
+              text: `Inspect this rendered scene against its manifest, asset recipes, and measured spatial evidence. The spatial bounds were parsed from the exact GLB hashes shown in the evidence and are authoritative for bounds, framing, floating, and intersection; use the image for visual fidelity and semantic judgment. Choose at most one obvious, high-impact issue. If one asset's silhouette or construction is clearly wrong, use asset-regenerate to replace only that asset's bounded 1-16 primitive recipe. Return pass/none when no safe correction is justified. Only request a patch allowed by the response schema. Manifest: ${JSON.stringify(manifest)} Asset plan: ${JSON.stringify(plan?.assets ?? [])} Spatial evidence: ${JSON.stringify(spatial ?? null)}`,
             },
             { inlineData: { data: image.toString("base64"), mimeType: "image/png" } },
           ],
@@ -231,7 +242,21 @@ export class DeterministicWorkflowAI implements WorkflowAI {
     return validatePlan(plan, maxObjects);
   }
 
-  async inspect(_manifest: SceneManifest, _screenshotPath: string, _spatial?: SpatialReport): Promise<Inspection> {
+  async inspect(
+    manifest: SceneManifest,
+    _screenshotPath: string,
+    _spatial?: SpatialReport,
+    _plan?: ScenePlan,
+  ): Promise<Inspection> {
+    if (manifest.revision > 1) {
+      return {
+        verdict: "pass",
+        category: "none",
+        issue: "",
+        evidence: "The deterministic correction was rerendered and reinspected.",
+        patch: { kind: "none" },
+      };
+    }
     return {
       verdict: "fix",
       category: "framing",
@@ -280,20 +305,30 @@ function parseJsonResponse(text: string | undefined): unknown {
 }
 
 function validatePlan(plan: ScenePlan, maxObjects: number): ScenePlan {
-  if (plan.objects.length > maxObjects || plan.assets.length > maxObjects) {
+  const normalized = ScenePlanSchema.parse({
+    ...plan,
+    assets: plan.assets.map((asset) => {
+      const size = boundsSize(recipeBounds(asset));
+      return {
+        ...asset,
+        dimensions: [Math.max(size[0], 0.001), Math.max(size[1], 0.001), Math.max(size[2], 0.001)],
+      };
+    }),
+  });
+  if (normalized.objects.length > maxObjects || normalized.assets.length > maxObjects) {
     throw new Error(`Scene plan exceeds configured maximum of ${maxObjects} objects/assets`);
   }
-  const assetIds = new Set(plan.assets.map((asset) => asset.id));
-  const objectIds = new Set(plan.objects.map((object) => object.id));
-  for (const object of plan.objects) {
+  const assetIds = new Set(normalized.assets.map((asset) => asset.id));
+  const objectIds = new Set(normalized.objects.map((object) => object.id));
+  for (const object of normalized.objects) {
     if (!assetIds.has(object.assetSpecId)) {
       throw new Error(`Object ${object.id} references missing asset spec ${object.assetSpecId}`);
     }
   }
-  for (const relation of plan.relationships) {
+  for (const relation of normalized.relationships) {
     if (!objectIds.has(relation.from) || !objectIds.has(relation.to)) {
       throw new Error(`Relationship references missing object: ${relation.from} -> ${relation.to}`);
     }
   }
-  return plan;
+  return normalized;
 }

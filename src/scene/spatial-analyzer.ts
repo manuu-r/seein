@@ -1,31 +1,41 @@
 import {
   SpatialReportSchema,
+  type ResolvedAsset,
   type SceneManifest,
   type ScenePlan,
   type SpatialReport,
   type Vec3,
 } from "../contracts.js";
+import { transformBoundsByTrs } from "./geometry-bounds.js";
 
-export const SPATIAL_ANALYZER_IDENTITY = "bounds-and-camera:v1";
+export const SPATIAL_ANALYZER_IDENTITY = "measured-glb-bounds-and-camera:v2";
 
 interface Bounds {
   min: Vec3;
   max: Vec3;
 }
 
-export function analyzeSpatial(plan: ScenePlan, manifest: SceneManifest): SpatialReport {
-  const specs = new Map(plan.assets.map((spec) => [spec.id, spec]));
+export function analyzeSpatial(
+  plan: ScenePlan,
+  manifest: SceneManifest,
+  assets: Map<string, ResolvedAsset>,
+): SpatialReport {
   const plannedObjects = new Map(plan.objects.map((object) => [object.id, object]));
   const objectBounds = new Map<string, Bounds>();
   const objects = manifest.objects.map((object) => {
     const planned = plannedObjects.get(object.id);
-    const spec = planned ? specs.get(planned.assetSpecId) : undefined;
-    if (!spec) throw new Error(`Spatial analysis is missing an asset specification for ${object.id}`);
-    const bounds = transformedBounds(spec.dimensions, object.position, object.rotation, object.scale);
+    const asset = planned ? assets.get(planned.assetSpecId) : undefined;
+    if (!asset) throw new Error(`Spatial analysis is missing a resolved asset for ${object.id}`);
+    if (!asset.geometry) throw new Error(`Spatial analysis refuses unmeasured GLB geometry for ${object.id}`);
+    const bounds = transformBoundsByTrs(asset.geometry.bounds, object.position, object.rotation, object.scale);
     objectBounds.set(object.id, bounds);
     const projection = projectBounds(bounds, manifest.camera.position, manifest.camera.target, manifest.camera.fov);
     return {
       objectId: object.id,
+      assetId: asset.assetId,
+      assetSha256: asset.sha256,
+      geometrySource: asset.geometry.source,
+      localBounds: asset.geometry.bounds,
       bounds,
       floorClearance: bounds.min[1],
       cameraDepth: projection.depth,
@@ -109,7 +119,7 @@ export function analyzeSpatial(plan: ScenePlan, manifest: SceneManifest): Spatia
   }
   const sceneBounds = combineBounds([...objectBounds.values()]);
   return SpatialReportSchema.parse({
-    schemaVersion: "1.0",
+    schemaVersion: "2.0",
     analyzer: SPATIAL_ANALYZER_IDENTITY,
     sceneRevision: manifest.revision,
     sceneBounds,
@@ -117,35 +127,6 @@ export function analyzeSpatial(plan: ScenePlan, manifest: SceneManifest): Spatia
     issues,
     generatedAt: new Date().toISOString(),
   });
-}
-
-function transformedBounds(dimensions: Vec3, position: Vec3, rotation: Vec3, scale: Vec3): Bounds {
-  const [width, height, depth] = dimensions.map(Math.abs) as Vec3;
-  const corners: Vec3[] = [];
-  for (const x of [-width / 2, width / 2]) {
-    for (const y of [0, height]) {
-      for (const z of [-depth / 2, depth / 2]) {
-        const scaled: Vec3 = [x * Math.abs(scale[0]), y * Math.abs(scale[1]), z * Math.abs(scale[2])];
-        const rotated = rotateXyz(scaled, rotation);
-        corners.push([rotated[0] + position[0], rotated[1] + position[1], rotated[2] + position[2]]);
-      }
-    }
-  }
-  return boundsFromPoints(corners);
-}
-
-function rotateXyz([x, y, z]: Vec3, [rx, ry, rz]: Vec3): Vec3 {
-  const cosX = Math.cos(rx);
-  const sinX = Math.sin(rx);
-  const y1 = y * cosX - z * sinX;
-  const z1 = y * sinX + z * cosX;
-  const cosY = Math.cos(ry);
-  const sinY = Math.sin(ry);
-  const x2 = x * cosY + z1 * sinY;
-  const z2 = -x * sinY + z1 * cosY;
-  const cosZ = Math.cos(rz);
-  const sinZ = Math.sin(rz);
-  return [x2 * cosZ - y1 * sinZ, x2 * sinZ + y1 * cosZ, z2];
 }
 
 function projectBounds(bounds: Bounds, camera: Vec3, target: Vec3, fovDegrees: number) {
@@ -192,10 +173,6 @@ function combineBounds(bounds: Bounds[]): Bounds {
       Math.max(...bounds.map((value) => value.max[2])),
     ],
   };
-}
-
-function boundsFromPoints(points: Vec3[]): Bounds {
-  return combineBounds(points.map((point) => ({ min: point, max: point })));
 }
 
 function boundsCorners(bounds: Bounds): Vec3[] {

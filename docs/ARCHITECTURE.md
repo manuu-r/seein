@@ -14,7 +14,8 @@ prompt -> backend bounded loop
   -> manifest + deterministic spatial facts
   -> cached or fresh Three.js/Playwright render
   -> cached or fresh Gemini inspection
-  -> zero or one validated patch and rerender
+  -> zero or one validated patch for this iteration
+  -> rerender -> reinspect, until pass or WORKFLOW_MAX_ITERATIONS
 ```
 
 ## Local services
@@ -62,4 +63,5 @@ Project folders are the artifact source of truth. ClickHouse is the searchable c
 - Gemini output is parsed through Zod schemas.
 - Blender input is a bounded recipe; arbitrary model-authored Python is not accepted from the API.
 - QA can change only an allowlisted set of scene properties.
-- Run attempts and revisions are bounded.
+- A geometry correction can replace one asset's bounded primitive recipe; it cannot inject Python or expand the object graph.
+- Run attempts and revisions are bounded (`WORKFLOW_MAX_ITERATIONS`, 1–4; default 2).

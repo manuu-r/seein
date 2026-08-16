@@ -16,12 +16,12 @@ npm audit --omit=dev
 Current result:
 
 - TypeScript typecheck passes.
-- 5 test files and 13 tests pass.
+- 5 test files and 19 tests pass.
 - Renderer and backend production builds pass.
 - The renderer bundle has a non-blocking size warning; it is intentionally a single minimal viewer entry for the MVP.
 - The production dependency audit reports 0 vulnerabilities.
 
-Tests cover contract bounds, artifact path safety, deterministic single/batch GLB generation, Y-up to Z-up conversion, generator-version cache isolation, world bounds, camera framing, real support-contact validation, the full bounded state machine, indexed reads, the one-patch revision rule, no-op refinement, and repeat-run AI/render cache reuse.
+Tests cover contract bounds, artifact path safety, deterministic single/batch GLB generation, Y-up to Z-up conversion, GLB accessor measurement, generator-version cache isolation, refusal of unmeasured spatial inputs, declared-versus-measured geometry disagreement, strict measured reuse compatibility, world bounds, camera framing, support-contact validation, the bounded state machine, indexed reads, single-asset geometry regeneration, final-render reinspection, exhaustion reporting, no-op/pass handling, and repeat-run AI/render cache reuse.
 
 ## Live local verification
 
@@ -30,6 +30,7 @@ Previously verified on Docker Desktop with the `linux/amd64` core image and Clic
 | Capability | Result | Evidence |
 |---|---|---|
 | ClickHouse migration | Pass | Project/cache/spatial additions created idempotently on the existing database |
+| Measured-geometry migration | Pass | Additive asset-bound and spatial-provenance columns applied on the existing ClickHouse 25.8 database |
 | ClickHouse workflow | Pass | Project index, workflow cache, two spatial reports, and six per-object spatial facts persisted |
 | Cross-process warm path | Pass | Research, plan, initial render, inspection, and patched final render all returned `cacheHit: true`; final project index returned `completed` |
 | Research cache | Pass | Identical second prompt reports `cacheHit: true` |
@@ -39,7 +40,8 @@ Previously verified on Docker Desktop with the `linux/amd64` core image and Clic
 | Coordinate contract | Pass | Final visual has a horizontal platform and upright subject/marker |
 | Three.js renderer | Pass | All three real Blender GLBs loaded below `SceneRoot` |
 | Chromium capture | Pass | Revision 1 and revision 2 screenshots created with no browser errors |
-| Bounded refinement | Pass | One framing issue produced one camera patch and no further loop |
+| Bounded refinement | Pass | Revision 1 produced one camera patch; revision 2 was rendered and independently reinspected as `pass` |
+| Spatial provenance | Pass | Both revisions persisted the exact asset SHA-256, GLB measurement identity, and local measured bounds |
 | Docker image | Pass | Final amd64 image builds with a 20–25 KB context |
 
 The definitive integrated run is retained under:
@@ -50,6 +52,8 @@ data/full-local/projects/
 ```
 
 Its event stream contains 24 ordered events from `created` through `completed`; its three generated assets are valid GLB 2.0 files. The following identical run, ending in `b31abd8f`, reused all three corrected recipe-v2 assets and completed both browser renders without starting Blender again.
+
+The measured-loop regression run used project ID `8e697e23-423c-4151-bc3b-fef820dbd6fb`. Its two inspection events are `fix` then `pass`; its ClickHouse spatial rows for both revisions contain the exact GLB hashes and local bounds. Separate adversarial tests prove that a `[1,1,1]` planner declaration cannot hide a measured 5 m asset, an 8 m-wide cached GLB cannot pass a 4 m request, an unmeasured asset is rejected, a geometry patch regenerates only the named asset, and an unresolved final inspection is surfaced as `qaExhausted: true`.
 
 ## Runtime issues found and fixed
 

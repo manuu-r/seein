@@ -1,11 +1,13 @@
 import {
   SceneManifestSchema,
+  ScenePlanSchema,
   type QaPatch,
   type ResolvedAsset,
   type SceneManifest,
   type ScenePlan,
 } from "../contracts.js";
 import { slugify } from "../lib/strings.js";
+import { boundsSize, recipeBounds } from "./geometry-bounds.js";
 
 export function assembleScene(
   projectId: string,
@@ -76,9 +78,40 @@ export function applyQaPatch(manifest: SceneManifest, patch: QaPatch): SceneMani
       object.labelVisible = patch.visible;
       break;
     }
+    case "asset-regenerate":
+      throw new Error("Asset regeneration must be applied to the scene plan and resolved GLB set");
     case "none":
       break;
   }
   return SceneManifestSchema.parse(next);
 }
 
+export function applyAssetRegeneration(plan: ScenePlan, patch: Extract<QaPatch, { kind: "asset-regenerate" }>): ScenePlan {
+  const next = structuredClone(plan);
+  const asset = next.assets.find((candidate) => candidate.id === patch.assetSpecId);
+  if (!asset) throw new Error(`QA patch references missing asset spec ${patch.assetSpecId}`);
+  asset.description = patch.description;
+  asset.parts = patch.parts;
+  const size = boundsSize(recipeBounds(asset));
+  asset.dimensions = [Math.max(size[0], 0.001), Math.max(size[1], 0.001), Math.max(size[2], 0.001)];
+  return ScenePlanSchema.parse(next);
+}
+
+export function applyResolvedAssets(
+  manifest: SceneManifest,
+  plan: ScenePlan,
+  assets: Map<string, ResolvedAsset>,
+): SceneManifest {
+  const next = structuredClone(manifest);
+  next.revision += 1;
+  next.generatedAt = new Date().toISOString();
+  const planned = new Map(plan.objects.map((object) => [object.id, object]));
+  for (const object of next.objects) {
+    const assetSpecId = planned.get(object.id)?.assetSpecId;
+    const resolved = assetSpecId ? assets.get(assetSpecId) : undefined;
+    if (!resolved) throw new Error(`No regenerated asset resolved for object ${object.id}`);
+    object.assetId = resolved.assetId;
+    object.url = resolved.url;
+  }
+  return SceneManifestSchema.parse(next);
+}

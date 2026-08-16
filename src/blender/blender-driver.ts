@@ -117,7 +117,7 @@ export class DeterministicBlenderDriver implements BlenderDriver {
 
   private async generateOne(spec: AssetSpec, outputPath: string): Promise<BlenderOutput> {
     await fs.mkdir(path.dirname(outputPath), { recursive: true });
-    const buffer = buildCubeGlb(spec.parts[0]?.color ?? "#f59e0b");
+    const buffer = buildCubeGlb(spec.parts[0]?.color ?? "#f59e0b", spec.dimensions);
     await fs.writeFile(outputPath, buffer);
     return { path: outputPath, generator: this.identity, metadata: { bytes: buffer.length, fixture: true } };
   }
@@ -215,10 +215,13 @@ function summarizeToolResult(content: unknown): string {
   return serialized.length > 12_000 ? `${serialized.slice(0, 12_000)}…` : serialized;
 }
 
-function buildCubeGlb(color: string): Buffer {
+function buildCubeGlb(color: string, dimensions: Vec3): Buffer {
+  const [width, height, depth] = dimensions;
   const positions = new Float32Array([
-    -0.5, -0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5, -0.5, 0.5, -0.5,
-    -0.5, -0.5, 0.5, 0.5, -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, 0.5, 0.5,
+    -width / 2, 0, -depth / 2, width / 2, 0, -depth / 2,
+    width / 2, height, -depth / 2, -width / 2, height, -depth / 2,
+    -width / 2, 0, depth / 2, width / 2, 0, depth / 2,
+    width / 2, height, depth / 2, -width / 2, height, depth / 2,
   ]);
   const indices = new Uint16Array([
     0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1,
@@ -241,7 +244,7 @@ function buildCubeGlb(color: string): Buffer {
       { buffer: 0, byteOffset: positionBytes.length, byteLength: indexBytes.length, target: 34963 },
     ],
     accessors: [
-      { bufferView: 0, componentType: 5126, count: 8, type: "VEC3", min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+      { bufferView: 0, componentType: 5126, count: 8, type: "VEC3", min: [-width / 2, 0, -depth / 2], max: [width / 2, height, depth / 2] },
       { bufferView: 1, componentType: 5123, count: 36, type: "SCALAR", min: [0], max: [7] },
     ],
   };

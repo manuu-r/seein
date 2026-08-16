@@ -14,8 +14,9 @@ SeeIn/
 │   ├── blender/blender-driver.ts     # Qwen-MM MCP batch generation + test GLBs
 │   ├── research/reference-collector.ts # Safe, cached reference-image downloads
 │   ├── scene/
-│   │   ├── scene-assembler.ts        # Plan -> declarative scene manifest
-│   │   └── spatial-analyzer.ts       # Bounds, support, collision, scale, framing facts
+│   │   ├── geometry-bounds.ts        # Parse GLB accessors/node transforms and recipe bounds
+│   │   ├── scene-assembler.ts        # Plan -> manifest + typed refinement patches
+│   │   └── spatial-analyzer.ts       # Measured support, collision, scale, framing facts
 │   ├── render/screenshot-driver.ts   # Persistent Playwright browser + test capture
 │   ├── storage/
 │   │   ├── artifact-store.ts         # Files, hashes, URLs, and future cloud seam
@@ -45,7 +46,9 @@ SeeIn/
 | Change what Gemini returns | `src/contracts.ts`, then `src/ai/workflow-ai.ts` |
 | Add a local model/provider | Implement the relevant interface in its existing adapter file |
 | Change asset reuse rules | `src/workflow/orchestrator.ts` and `src/context/clickhouse-store.ts` |
+| Change GLB measurement or recipe bounds | `src/scene/geometry-bounds.ts` |
 | Improve physical/spatial reasoning | `src/scene/spatial-analyzer.ts` |
+| Change allowed refinement patches | `src/contracts.ts` and `src/scene/scene-assembler.ts` |
 | Change scene behavior or file format | `src/contracts.ts` and `renderer/main.ts` |
 | Add Google Cloud Storage | Implement `ArtifactStore`; do not change the workflow |
 | Move to ClickHouse Cloud | Change credentials only; the schema and adapter stay the same |
@@ -62,10 +65,12 @@ data/projects/<slug>-<id>/
 │   ├── sources.json
 │   └── references/
 ├── plan/scene-plan.json
+├── plan/scene-plan-revision-002.json       # only after asset regeneration
 ├── assets/
 │   ├── index.json
-│   ├── generated/
-│   └── reused/
+│   ├── index-revision-002.json             # only after asset regeneration
+│   ├── generated/revision-001/
+│   └── reused/revision-001/
 ├── scene/revision-001.json
 ├── qa/
 │   ├── spatial-revision-001.json
@@ -74,4 +79,4 @@ data/projects/<slug>-<id>/
 └── logs/events.ndjson
 ```
 
-A second scene and render revision exists only when QA produced a real patch. A pass does not create a duplicate revision.
+A later scene and render revision exists only when QA produced a real patch. Each generated/reused asset copy lives under its revision so geometry evidence remains attributable and a repair cannot overwrite the prior GLB. A pass does not create a duplicate revision, but every final render does have a corresponding `qa/revision-NNN.json` inspection.

@@ -55,7 +55,7 @@ CLICKHOUSE_USERNAME=<service-user>
 CLICKHOUSE_PASSWORD=<secret>
 ```
 
-Use TLS, a dedicated least-privilege service account, and network allowlisting where available. Binary data stays in Cloud Storage; ClickHouse rows keep object keys, hashes, dimensions, tags, relationships, revisions, and timestamps.
+Use TLS, a dedicated least-privilege service account, and network allowlisting where available. Binary data stays in Cloud Storage; ClickHouse rows keep object keys, hashes, recipe dimensions, measured bounds, geometry provenance, tags, relationships, revisions, and timestamps.
 
 ## Google Cloud resources
 
@@ -78,12 +78,12 @@ The current worker image explicitly targets `linux/amd64`. Confirm that the sele
 4. Deploy the Cloud Run Job and invoke one deterministic-AI smoke run; verify GLBs and screenshots land in the bucket.
 5. Deploy the API service and job dispatcher; verify create/status/events/view endpoints.
 6. Enable Gemini, run one grounded production prompt, and verify source/reference artifacts plus multimodal QA.
-7. Run the identical prompt again and require a research cache hit and corrected asset reuse before production promotion.
+7. Run the identical prompt again and require a research cache hit and measured-compatible asset reuse before production promotion.
 
 ## Reliability and security gates
 
 - Treat Cloud Run Job retries as duplicate delivery; all writes must be idempotent by run/revision key.
-- Keep the one-patch refinement bound and object/reference limits in server configuration.
+- Keep the 1–4 inspection-iteration bound and object/reference limits in server configuration.
 - Use signed URLs with short expiry or API proxying; never expose ClickHouse or Gemini credentials to the renderer.
 - Retain event rows and final manifests longer than transient screenshots or downloaded references.
 - Emit structured logs with `project_id`, `run_id`, stage, and revision but never prompts or secrets by default in production telemetry.

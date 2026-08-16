@@ -22,6 +22,14 @@ SCREENSHOT_DRIVER=placeholder
 
 Verification mode exercises project creation, caching, asset generation, manifest revisions, QA patching, and artifact persistence without claiming visual equivalence to Blender and Chromium.
 
+The QA loop is bounded with:
+
+```env
+WORKFLOW_MAX_ITERATIONS=2
+```
+
+Allowed values are 1–4. The default `2` means “inspect the initial render, apply at most one patch, then inspect the corrected render.” A value of `1` performs inspection without any correction opportunity. If the last allowed inspection still asks for a fix, the run records `qaExhausted: true`.
+
 ## ClickHouse
 
 ```bash
@@ -31,7 +39,7 @@ npm run migrate
 
 The migration command is idempotent and does not require a Gemini key or Blender installation.
 
-To prove reuse, run the same deterministic prompt twice with `CONTEXT_DRIVER=clickhouse`. The second run should report cache hits for research, plan, initial render, inspection, and any patched final render, while reusing all matching assets. Queries and table purposes are documented in [CLICKHOUSE.md](CLICKHOUSE.md).
+To prove reuse, run the same deterministic prompt twice with `CONTEXT_DRIVER=clickhouse`. The second run should report cache hits for research, plan, each applicable render and inspection, while reusing only matching assets whose files still pass SHA-256 and measured-bounds validation. Queries and table purposes are documented in [CLICKHOUSE.md](CLICKHOUSE.md).
 
 ## Qwen-MM-Plugins and Blender
 

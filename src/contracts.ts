@@ -2,6 +2,13 @@ import { z } from "zod";
 
 export const Vec3Schema = z.tuple([z.number(), z.number(), z.number()]);
 export type Vec3 = z.infer<typeof Vec3Schema>;
+export const PositiveVec3Schema = z.tuple([z.number().positive(), z.number().positive(), z.number().positive()]);
+
+export const Bounds3Schema = z.object({
+  min: Vec3Schema,
+  max: Vec3Schema,
+});
+export type Bounds3 = z.infer<typeof Bounds3Schema>;
 
 export const HexColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 
@@ -41,7 +48,7 @@ export const PrimitiveKindSchema = z.enum([
 export const AssetPartSchema = z.object({
   name: z.string().min(1),
   primitive: PrimitiveKindSchema,
-  size: Vec3Schema,
+  size: PositiveVec3Schema,
   position: Vec3Schema,
   rotation: Vec3Schema.default([0, 0, 0]),
   color: HexColorSchema,
@@ -54,7 +61,7 @@ export const AssetSpecSchema = z.object({
   category: z.string().min(1),
   description: z.string().min(1),
   tags: z.array(z.string().min(1)).min(1).max(16),
-  dimensions: Vec3Schema,
+  dimensions: PositiveVec3Schema,
   style: z.string().min(1),
   parts: z.array(AssetPartSchema).min(1).max(16),
 });
@@ -120,6 +127,14 @@ export const ScenePlanSchema = z.object({
 });
 export type ScenePlan = z.infer<typeof ScenePlanSchema>;
 
+export const AssetGeometrySchema = z.object({
+  bounds: Bounds3Schema,
+  size: Vec3Schema,
+  source: z.literal("glb-accessors:v1"),
+  meshInstances: z.number().int().positive(),
+});
+export type AssetGeometry = z.infer<typeof AssetGeometrySchema>;
+
 export const ResolvedAssetSchema = z.object({
   assetId: z.string().min(1),
   assetKey: z.string().min(1),
@@ -129,6 +144,7 @@ export const ResolvedAssetSchema = z.object({
   sha256: z.string().min(1),
   reused: z.boolean(),
   generator: z.string().min(1),
+  geometry: AssetGeometrySchema.optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type ResolvedAsset = z.infer<typeof ResolvedAssetSchema>;
@@ -156,13 +172,12 @@ export const SceneManifestSchema = z.object({
 });
 export type SceneManifest = z.infer<typeof SceneManifestSchema>;
 
-export const Bounds3Schema = z.object({
-  min: Vec3Schema,
-  max: Vec3Schema,
-});
-
 export const SpatialObjectFactSchema = z.object({
   objectId: z.string().min(1),
+  assetId: z.string().min(1),
+  assetSha256: z.string().length(64),
+  geometrySource: AssetGeometrySchema.shape.source,
+  localBounds: Bounds3Schema,
   bounds: Bounds3Schema,
   floorClearance: z.number(),
   cameraDepth: z.number(),
@@ -178,7 +193,7 @@ export const SpatialIssueSchema = z.object({
 });
 
 export const SpatialReportSchema = z.object({
-  schemaVersion: z.literal("1.0"),
+  schemaVersion: z.literal("2.0"),
   analyzer: z.string().min(1),
   sceneRevision: z.number().int().positive(),
   sceneBounds: Bounds3Schema,
@@ -213,6 +228,12 @@ export const QaPatchSchema = z.discriminatedUnion("kind", [
     objectId: z.string().min(1),
     visible: z.boolean(),
   }),
+  z.object({
+    kind: z.literal("asset-regenerate"),
+    assetSpecId: z.string().min(1),
+    description: z.string().min(1),
+    parts: z.array(AssetPartSchema).min(1).max(16),
+  }),
   z.object({ kind: z.literal("none") }),
 ]);
 export type QaPatch = z.infer<typeof QaPatchSchema>;
@@ -222,6 +243,7 @@ export const InspectionSchema = z.object({
   category: z.enum([
     "none",
     "asset-load",
+    "geometry",
     "framing",
     "intersection",
     "floating",
@@ -273,6 +295,8 @@ export const ProjectRecordSchema = z.object({
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
   finalRevision: z.number().int().positive().optional(),
+  finalQaVerdict: InspectionSchema.shape.verdict.optional(),
+  qaExhausted: z.boolean().optional(),
   error: z.string().optional(),
 });
 export type ProjectRecord = z.infer<typeof ProjectRecordSchema>;
