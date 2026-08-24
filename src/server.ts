@@ -38,7 +38,7 @@ app.get("/api/projects", async () => ({ projects: await services.projects.list()
 
 app.post("/api/projects", async (request, reply) => {
   const input = CreateProjectRequestSchema.parse(request.body);
-  const project = await services.orchestrator.start(input.prompt);
+  const project = await services.orchestrator.start(input.prompt, input.userId);
   return reply.code(202).send(projectResponse(project));
 });
 
@@ -71,23 +71,57 @@ app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/events", as
   return { events: content.split("\n").filter(Boolean).map((line) => JSON.parse(line) as unknown) };
 });
 
+app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/interaction", async (request, reply) => {
+  const [project, state] = await Promise.all([
+    services.projects.load(request.params.projectId),
+    services.orchestrator.getGraphState(request.params.projectId),
+  ]);
+  if (!project) return reply.code(404).send({ error: "Project not found" });
+  if (!state) return reply.code(404).send({ error: "Interaction graph not found" });
+  return {
+    project: projectResponse(project),
+    state,
+    sceneUrl: `/api/projects/${project.projectId}/scene/latest`,
+  };
+});
+
+app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/clarifications", async (request, reply) => {
+  const state = await services.orchestrator.answerClarifications(request.params.projectId, request.body);
+  return reply.code(202).send({ state });
+});
+
+app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/research-decision", async (request, reply) => {
+  const state = await services.orchestrator.decideResearch(request.params.projectId, request.body);
+  return reply.code(202).send({ state });
+});
+
+app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/feedback", async (request, reply) => {
+  const result = await services.orchestrator.submitFeedback(request.params.projectId, request.body);
+  return reply.code(result.nextProject ? 202 : 200).send({
+    state: result.state,
+    ...(result.nextProject ? { nextProject: projectResponse(result.nextProject) } : {}),
+  });
+});
+
 app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/view", async (request, reply) => {
   const project = await services.projects.load(request.params.projectId);
   if (!project) return reply.code(404).send({ error: "Project not found" });
-  const manifest = `/api/projects/${project.projectId}/scene/latest`;
-  return reply.redirect(`/viewer/?manifest=${encodeURIComponent(manifest)}`);
+  return reply.redirect(`/viewer/?project=${encodeURIComponent(project.projectId)}`);
 });
 
 app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/rerun", async (request, reply) => {
   const project = await services.projects.load(request.params.projectId);
   if (!project) return reply.code(404).send({ error: "Project not found" });
-  const next = await services.orchestrator.start(project.prompt);
+  const next = await services.orchestrator.start(project.prompt, project.userId, project.projectId);
   return reply.code(202).send(projectResponse(next));
 });
 
 app.setErrorHandler((error, _request, reply) => {
   const normalized = error instanceof Error ? error : new Error(String(error));
-  const status = "issues" in normalized ? 400 : 500;
+  const isStateConflict = /not waiting|Generation is blocked|reached the configured|requires feedback|requires a short explanation|interaction update is already/i.test(
+    normalized.message,
+  );
+  const status = "issues" in normalized ? 400 : isStateConflict ? 409 : 500;
   app.log.error(error);
   void reply.code(status).send({ error: normalized.message });
 });
@@ -106,6 +140,7 @@ function projectResponse(project: Awaited<ReturnType<typeof services.projects.cr
     ...project,
     statusUrl: `${config.PUBLIC_BASE_URL}/api/projects/${project.projectId}`,
     eventsUrl: `${config.PUBLIC_BASE_URL}/api/projects/${project.projectId}/events`,
+    interactionUrl: `${config.PUBLIC_BASE_URL}/api/projects/${project.projectId}/interaction`,
     viewerUrl: `${config.PUBLIC_BASE_URL}/api/projects/${project.projectId}/view`,
   };
 }

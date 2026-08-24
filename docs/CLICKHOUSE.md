@@ -7,6 +7,8 @@ ClickHouse is the fast metadata, cache, scene-graph, and lineage plane. Binary a
 Store in ClickHouse:
 
 - project status and ordered run events;
+- resumable graph checkpoints and explicit wait reasons;
+- user-scoped preferences promoted only from explicit feedback;
 - research, plan, render, and inspection cache payloads;
 - asset recipes, tags, requested recipe dimensions, measured GLB bounds/size, hashes, paths, and generator identity;
 - immutable scene revisions and flattened object transforms;
@@ -25,6 +27,8 @@ Do not store GLB, PNG, or reference-image bytes in ClickHouse. Keeping blobs in 
 | `run_events` | Ordered workflow transitions and diagnostic payloads |
 | `research_cache` | Prompt/model/schema keyed grounded briefs |
 | `workflow_cache` | Typed plan, render, and inspection cache entries |
+| `workflow_graph_states` | Immutable-by-sequence graph checkpoints; latest state is an `argMax` lookup |
+| `user_preference_profiles` | Latest explicit preferences per user, with full evidence in the payload |
 | `assets` | Recipes, search fields, generator version, output hash/path, and measured GLB bounds |
 | `scene_revisions` | Full immutable scene manifests and content hashes |
 | `scene_objects` | Fast per-revision object state lookup |
@@ -46,13 +50,14 @@ Asset resolution performs two ClickHouse queries for an entire plan, not two que
 
 The backend scores that pool and then enforces generator identity, category, style, tag overlap, file existence, and SHA-256 validity. It measures each surviving GLB from its accessors and node transforms and compares those measured bounds with the requested primitive-recipe bounds. A related hit must remain within the strict size and local-anchor tolerances; a compatible hit receives an alias under the requested content key carrying the measured record.
 
-Project list/status, latest scene, and events are also served from ClickHouse. The filesystem fallback warms the index when running with a fresh in-memory store or importing older project folders.
+Project list/status, latest scene, events, and the latest resumable graph checkpoint are served from ClickHouse. The filesystem fallback warms the index when running with a fresh in-memory store or importing older project folders.
 
 ## Write path
 
 - Missing assets are inserted as one batch.
 - Run events use a short 75 ms buffer and a 32-event threshold.
 - Latest project snapshots are coalesced by project ID before insertion; events preserve stage history.
+- Graph checkpoints write synchronously at node boundaries because losing an interrupt cursor is more expensive than one small insert; `(project_id, sequence)` retains history while `argMax` serves the hot resume path.
 - Scene manifest, object rows, and relationship rows insert concurrently.
 - Spatial report, object facts, and issue rows insert concurrently.
 - Full payload strings preserve the validated contract; frequently queried fields are duplicated into typed columns.

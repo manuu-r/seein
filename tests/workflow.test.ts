@@ -2,13 +2,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DeterministicWorkflowAI, type ResearchPlan } from "../src/ai/workflow-ai.js";
+import { DeterministicWorkflowAI } from "../src/ai/workflow-ai.js";
 import { createAppServices } from "../src/app.js";
 import { DeterministicBlenderDriver, type BlenderRequest } from "../src/blender/blender-driver.js";
 import { loadConfig } from "../src/config.js";
 import type { AssetRecord } from "../src/context/context-store.js";
-import type { AssetSpec, Inspection, SceneManifest, SpatialReport } from "../src/contracts.js";
+import type { AssetSpec, Inspection, ResearchBrief, SceneManifest, SpatialReport } from "../src/contracts.js";
 import { PlaceholderScreenshotDriver } from "../src/render/screenshot-driver.js";
+import type { IntentFrame } from "../src/workflow/graph-contracts.js";
 import { isCompatibleAssetForGenerator } from "../src/workflow/orchestrator.js";
 
 const temporaryDirectories: string[] = [];
@@ -109,12 +110,18 @@ describe("bounded local workflow", () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "seein-fast-path-"));
     temporaryDirectories.push(root);
     class CountingPassAI extends DeterministicWorkflowAI {
-      combinedCalls = 0;
+      researchCalls = 0;
+      planCalls = 0;
       inspectionCalls = 0;
 
-      override async researchAndPlan(prompt: string, maxObjects: number): Promise<ResearchPlan> {
-        this.combinedCalls += 1;
-        return super.researchAndPlan(prompt, maxObjects);
+      override async research(prompt: string) {
+        this.researchCalls += 1;
+        return super.research(prompt);
+      }
+
+      override async plan(prompt: string, research: ResearchBrief, maxObjects: number, intent?: IntentFrame) {
+        this.planCalls += 1;
+        return super.plan(prompt, research, maxObjects, intent);
       }
 
       override async inspect(
@@ -154,7 +161,8 @@ describe("bounded local workflow", () => {
 
       const second = await services.orchestrator.run("A cached observatory scene");
       expect(second.finalScene.revision).toBe(1);
-      expect(ai.combinedCalls).toBe(1);
+      expect(ai.researchCalls).toBe(1);
+      expect(ai.planCalls).toBe(1);
       expect(ai.inspectionCalls).toBe(1);
       expect(screenshots.captures).toBe(1);
       const events = (await fs.readFile(path.join(second.project.root, "logs", "events.ndjson"), "utf8"))

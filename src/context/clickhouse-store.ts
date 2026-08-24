@@ -16,6 +16,12 @@ import {
   type SceneManifest,
   type SpatialReport,
 } from "../contracts.js";
+import {
+  UserPreferenceProfileSchema,
+  WorkflowGraphStateSchema,
+  type UserPreferenceProfile,
+  type WorkflowGraphState,
+} from "../workflow/graph-contracts.js";
 import type { Config } from "../config.js";
 import type {
   AssetCandidates,
@@ -79,6 +85,24 @@ export class ClickHouseContextStore implements ContextStore {
         payload String,
         created_at DateTime64(3, 'UTC')
       ) ENGINE = ReplacingMergeTree(created_at) ORDER BY (kind, cache_key)`,
+      `CREATE TABLE IF NOT EXISTS workflow_graph_states (
+        project_id String,
+        run_id String,
+        user_id String,
+        graph_version LowCardinality(String),
+        current_node LowCardinality(String),
+        status LowCardinality(String),
+        waiting_for LowCardinality(String),
+        sequence UInt32,
+        payload String,
+        updated_at DateTime64(3, 'UTC')
+      ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (project_id, sequence)`,
+      `CREATE TABLE IF NOT EXISTS user_preference_profiles (
+        user_id String,
+        preference_count UInt16,
+        payload String,
+        updated_at DateTime64(3, 'UTC')
+      ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY user_id`,
       `CREATE TABLE IF NOT EXISTS assets (
         asset_key String,
         asset_id String,
@@ -496,6 +520,52 @@ export class ClickHouseContextStore implements ContextStore {
         })),
       ) : Promise.resolve(),
     ]);
+  }
+
+  async findGraphState(projectId: string): Promise<WorkflowGraphState | null> {
+    const rows = await this.query(
+      `SELECT argMax(payload, updated_at) AS payload
+       FROM workflow_graph_states WHERE project_id = {projectId:String} GROUP BY project_id`,
+      { projectId },
+    );
+    const payload = rows[0]?.payload;
+    return typeof payload === "string" ? WorkflowGraphStateSchema.parse(JSON.parse(payload)) : null;
+  }
+
+  async storeGraphState(state: WorkflowGraphState): Promise<void> {
+    const parsed = WorkflowGraphStateSchema.parse(state);
+    await this.insert("workflow_graph_states", [{
+      project_id: parsed.projectId,
+      run_id: parsed.runId,
+      user_id: parsed.userId,
+      graph_version: parsed.graphVersion,
+      current_node: parsed.currentNode,
+      status: parsed.status,
+      waiting_for: parsed.waitingFor ?? "",
+      sequence: parsed.sequence,
+      payload: JSON.stringify(parsed),
+      updated_at: parsed.updatedAt.replace("T", " ").replace("Z", ""),
+    }]);
+  }
+
+  async findUserPreferenceProfile(userId: string): Promise<UserPreferenceProfile | null> {
+    const rows = await this.query(
+      `SELECT argMax(payload, updated_at) AS payload
+       FROM user_preference_profiles WHERE user_id = {userId:String} GROUP BY user_id`,
+      { userId },
+    );
+    const payload = rows[0]?.payload;
+    return typeof payload === "string" ? UserPreferenceProfileSchema.parse(JSON.parse(payload)) : null;
+  }
+
+  async storeUserPreferenceProfile(profile: UserPreferenceProfile): Promise<void> {
+    const parsed = UserPreferenceProfileSchema.parse(profile);
+    await this.insert("user_preference_profiles", [{
+      user_id: parsed.userId,
+      preference_count: parsed.preferences.length,
+      payload: JSON.stringify(parsed),
+      updated_at: parsed.updatedAt.replace("T", " ").replace("Z", ""),
+    }]);
   }
 
   private async flushEvents(): Promise<void> {

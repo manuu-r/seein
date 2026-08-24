@@ -35,6 +35,7 @@ const ConfigSchema = z.object({
   REFERENCE_MAX_BYTES: z.coerce.number().int().min(1024).default(8_000_000),
   WORKFLOW_MAX_OBJECTS: z.coerce.number().int().min(1).max(12).default(8),
   WORKFLOW_MAX_ITERATIONS: z.coerce.number().int().min(1).max(4).default(2),
+  WORKFLOW_MAX_RESEARCH_ROUNDS: z.coerce.number().int().min(1).max(3).default(2),
 });
 
 export type Config = ReturnType<typeof loadConfig>;

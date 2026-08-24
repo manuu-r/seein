@@ -13,7 +13,7 @@ export class ProjectManager {
     private readonly context: ContextStore,
   ) {}
 
-  async create(prompt: string): Promise<ProjectRecord> {
+  async create(prompt: string, userId = "local-user", parentProjectId?: string): Promise<ProjectRecord> {
     const now = new Date().toISOString();
     const projectId = randomUUID();
     const runId = randomUUID();
@@ -25,6 +25,8 @@ export class ProjectManager {
       projectId,
       runId,
       prompt,
+      userId,
+      ...(parentProjectId ? { parentProjectId } : {}),
       slug,
       root,
       status: "created",

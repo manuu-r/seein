@@ -5,10 +5,13 @@
 The backend owns every decision and side effect. The frontend receives a versioned scene manifest, loads GLBs, and displays labels, highlights, orbit controls, and declarative transitions. It has no Gemini, ClickHouse, research, Blender, or workflow credentials.
 
 ```text
-prompt -> backend bounded loop
-  -> ClickHouse phase caches
-  -> Gemini grounded research + plan (one cold call)
-       ├─ reference downloads || research artifact writes
+prompt -> checkpointed backend graph
+  -> Gemini clarification -> wait for typed answers
+  -> Gemini intent + three-perspective research agenda
+  -> visual identity || objects/materials || scale/space research
+  -> synthesis + deterministic evidence gate -> wait for approval
+  -> Gemini scene plan from approved dossier
+       ├─ reference downloads || evidence artifact writes
        └─ bulk ClickHouse asset lookup
             -> one Qwen-MM Blender batch for all missing GLBs
   -> manifest + deterministic spatial facts
@@ -16,6 +19,7 @@ prompt -> backend bounded loop
   -> cached or fresh Gemini inspection
   -> zero or one validated patch for this iteration
   -> rerender -> reinspect, until pass or WORKFLOW_MAX_ITERATIONS
+  -> wait for acceptance/revision feedback
 ```
 
 ## Local services
@@ -23,13 +27,13 @@ prompt -> backend bounded loop
 | Component | Responsibility | Persistent data |
 |---|---|---|
 | Core API | Workflow, HTTP API, manifest delivery | Project folders |
-| ClickHouse | Phase caches, project index, assets, scene graph, spatial facts, runs, revisions, QA | Docker volume |
+| ClickHouse | Graph checkpoints, preferences, phase caches, project index, assets, scene graph, spatial facts, runs, revisions, QA | Docker volume |
 | Qwen-MM Blender MCP | Safe access to a running Blender instance | Shared artifact volume |
 | Blender + Xvfb | Geometry, materials, GLB export | Shared artifact volume |
 | Chromium | Render fidelity and screenshots | Screenshots in project folders |
 | Gemini API | Research synthesis, planning, multimodal QA | Only provider outside the host |
 
-Gemini research enables both web and image search grounding. The cold path requests research and a scene plan together. Grounding chunks are merged into the validated research brief so reference images retain their containing source page. The configured research model must support image-search grounding; the default is `gemini-3.1-flash-image`.
+Gemini research enables both web and image search grounding. The cold path separates intent, research, and scene planning so an attractive early guess cannot become geometry before the evidence gate. Grounding chunks and claim-support indices are bound into the validated dossier so findings and reference images retain provenance. The configured research model must support image-search grounding; the default is `gemini-3.1-flash-image`.
 
 ## Portability seams
 
@@ -40,7 +44,7 @@ The core depends on interfaces rather than deployment products:
 - `WorkflowAI`: Gemini in production, deterministic fixture provider in tests.
 - `BlenderDriver`: Qwen-MM MCP in production, valid minimal GLBs in tests.
 - `ScreenshotDriver`: Playwright in production, deterministic placeholder image in tests.
-- `JobRunner`: in-process locally, Cloud Run Job trigger later.
+- Graph executor: explicit TypeScript nodes/checkpoints locally, durable worker runtime later without changing state contracts.
 
 ## Container image
 
@@ -65,3 +69,4 @@ Project folders are the artifact source of truth. ClickHouse is the searchable c
 - QA can change only an allowlisted set of scene properties.
 - A geometry correction can replace one asset's bounded primitive recipe; it cannot inject Python or expand the object graph.
 - Run attempts and revisions are bounded (`WORKFLOW_MAX_ITERATIONS`, 1–4; default 2).
+- Research attempts are bounded (`WORKFLOW_MAX_RESEARCH_ROUNDS`, 1–3; default 2).

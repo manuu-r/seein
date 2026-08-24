@@ -1,6 +1,6 @@
 # SeeIn Local Core
 
-SeeIn turns a concept prompt into a reusable interactive 3D scene. The backend performs grounded research, collects references, plans objects, reuses measured compatible assets, generates missing GLBs in Blender, assembles a declarative scene, captures it in a real browser, and runs a bounded Gemini visual-QA/refinement loop before publishing the final scene. The browser is only a renderer.
+SeeIn turns a concept prompt into a reusable interactive 3D scene through a resumable backend agent graph. It clarifies consequential intent, runs three grounded research perspectives in parallel, exposes an evidence-readiness checkpoint, reuses or generates measured assets, renders and visually refines the scene, then learns from explicit user feedback. The browser is only a renderer and typed input surface.
 
 > Status: working local MVP. The deterministic AI provider is intended for offline development and CI; the production path uses Gemini while all other workflow services remain local.
 
@@ -13,6 +13,7 @@ SeeIn turns a concept prompt into a reusable interactive 3D scene. The backend p
 - The workflow has a configurable 1–4 inspection iterations; the default of 2 permits one correction followed by mandatory verification of the corrected render.
 - Spatial evidence is derived from the exact GLB's mesh accessors and carries its SHA-256 provenance; planner-declared dimensions are never used as measured geometry.
 - Gemini returns schema-validated data and never writes renderer source code.
+- Gemini performs semantic work inside typed nodes; deterministic backend guards choose graph edges and bounds.
 - All scene content is mounted below one Three.js `SceneRoot` group.
 
 ## Quick start
@@ -35,6 +36,8 @@ curl -X POST http://localhost:8787/api/projects \
   -d '{"prompt":"A compact medieval blacksmith workshop with labeled tools"}'
 ```
 
+Open the returned `viewerUrl`. The guided renderer shows the backend's clarification questions, research checks, generation progress, scene states, and final feedback controls.
+
 For an offline deterministic smoke run that does not require Gemini, Blender, ClickHouse, or Chromium:
 
 ```bash
@@ -44,6 +47,7 @@ npm run demo -- "A compact medieval blacksmith workshop"
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Agent graph design and research](docs/AGENT_GRAPH.md)
 - [Project structure and file map](docs/PROJECT_STRUCTURE.md)
 - [Performance, graph, loop, and spatial decisions](docs/PERFORMANCE.md)
 - [Workflow and contracts](docs/WORKFLOW.md)
@@ -69,6 +73,8 @@ npm run demo -- "A compact medieval blacksmith workshop"
 - [x] Persistent Playwright browser, content-addressed render reuse, and renderer-readiness protocol
 - [x] ClickHouse-indexed project status, latest scene, events, phase caches, and spatial facts
 - [x] Backend API, run status, events, and reruns
+- [x] Resumable clarification → parallel research → readiness approval → generation → feedback graph
+- [x] Guided display-only renderer for graph progress, approvals, and revision feedback
 - [x] Deterministic end-to-end, geometry-regeneration, reuse, final-reinspection, and exhaustion verification
 - [x] Real Chromium rendering and two-pass screenshot verification
 - [ ] Live Gemini verification (requires `GEMINI_API_KEY`)

@@ -6,8 +6,12 @@ This document records the speed design and the graph/loop research cross-check a
 
 ```text
 cold prompt
-  -> 1 Gemini grounded research+plan call
-  -> references download || research files
+  -> 1 Gemini clarification call -> user interrupt
+  -> 1 Gemini intent/agenda call
+  -> 3 Gemini grounded research calls in parallel
+  -> 1 Gemini synthesis call -> evidence approval interrupt
+  -> 1 Gemini scene-plan call
+  -> references download || evidence files
   -> 2 ClickHouse asset queries
   -> 0 or 1 batched Blender MCP call
   -> scene + spatial facts stored in parallel
@@ -18,9 +22,9 @@ cold prompt
   -> repeat only up to WORKFLOW_MAX_ITERATIONS
 
 exact warm prompt
-  -> ClickHouse cache reads
+  -> ClickHouse graph/semantic-node cache reads
   -> reference/asset/render file copies
-  -> 0 Gemini calls, 0 Blender calls, 0 Chromium captures
+  -> 0 repeated Gemini calls for unchanged node inputs, 0 Blender calls, 0 Chromium captures
 ```
 
 The warm path assumes unchanged cache identities and healthy cached files. Every binary cache hit is SHA-256 checked before reuse. Renderer errors are never cached.
@@ -29,7 +33,9 @@ The warm path assumes unchanged cache identities and healthy cached files. Every
 
 | Cost center | Implementation |
 |---|---|
-| Gemini research + plan | One combined grounded structured call on a cold prompt |
+| Clarification | Content-addressed by prompt plus explicit preference profile |
+| Gemini research | Three independent grounded calls run concurrently; a slow branch sets latency, not their sum |
+| Research synthesis + plan | Separate cacheable calls because approval and feedback can invalidate one without invalidating the other |
 | Repeat AI calls | Phase-specific content-addressed research, plan, and inspection caches |
 | Reference images | Concurrent downloads and a URL-addressed local reference library |
 | Asset lookup | One exact-key query plus one related-candidate query for the whole plan |
@@ -43,19 +49,18 @@ The warm path assumes unchanged cache identities and healthy cached files. Every
 | Run telemetry | Events buffer briefly and insert as a batch |
 | HTTP project reads | ClickHouse project/latest-scene/event indexes; filesystem is fallback truth |
 
-## Why the loop stays plain TypeScript
+## Why the graph stays plain TypeScript for the MVP
 
-The current loop has fixed phases and a small configured iteration bound. An orchestration framework would add state serialization, adapters, and debugging layers without shortening this code.
+The current graph now includes durable human interrupts, parallel research, conditional edges, typed notes, and two bounded loops. Its state and checkpoints are implemented explicitly so the control boundary is inspectable and no framework-specific chat transcript becomes the source of truth.
 
-- [LangGraph](https://docs.langchain.com/oss/python/langgraph/workflows-agents) is a strong fit when the graph becomes dynamic, interruptible, or human-reviewed.
-- [Pydantic AI with DBOS](https://pydantic.dev/articles/pydantic-ai-dbos) and Temporal-style execution are relevant when a run must resume across worker crashes or span distributed jobs.
-- Neither improves the current single-process critical path. The existing `run_events`, immutable revisions, typed phase outputs, and deterministic cache keys are the migration boundary if durability becomes necessary.
+- [LangGraph interrupts](https://langchain-ai.github.io/langgraph/concepts/breakpoints/), [Google ADK](https://developers.googleblog.com/build-long-running-ai-agents-that-pause-resume-and-never-lose-context-with-adk/), [AutoGen GraphFlow](https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/graph-flow.html), and [Mastra workflows](https://mastra.ai/ai-workflows) converge on explicit state, conditional edges, suspension/resume, and observable steps.
+- SeeIn implements those portable primitives over its current ClickHouse/project-folder boundary. Mastra is the closest TypeScript replacement when multi-worker leasing or crash-safe replay inside a running node becomes necessary.
 
-Adopt a durable engine only when at least one real requirement appears: multi-worker ownership, crash resume inside a phase, human approval waits, scheduled jobs, or dynamic/long-running graphs beyond this bounded loop.
+Adopt a general durable engine when multi-worker ownership, idempotency leases, or crash-safe replay *inside* a running node becomes necessary. Waiting checkpoints already resume across HTTP requests and process restarts.
 
 ## Graph research cross-check
 
-Knowledge-graph RAG systems such as [LightRAG](https://github.com/HKUDS/LightRAG) are designed to extract and retrieve relationships across document corpora. SeeIn currently researches a small source set per prompt; graph extraction would add model calls and latency before it adds useful recall. It is therefore not on the request path.
+Knowledge-graph RAG systems such as [LightRAG](https://github.com/HKUDS/LightRAG) are designed to extract and retrieve relationships across document corpora. SeeIn currently researches a small source set per prompt; graph extraction would add model calls and latency before it adds useful recall. The research agenda and object studies provide a smaller evidence graph without another extraction call.
 
 The useful graph is the scene graph already produced by planning:
 
@@ -65,7 +70,7 @@ object node -> typed spatial/semantic edge -> object node
             -> asset recipe and immutable output hash
 ```
 
-That direction agrees with recent spatial work: [3DGraphLLM](https://github.com/CognitiveAISystems/3DGraphLLM), [OSU-3DSG](https://github.com/YuansuHao/OSU-3DSG), [SaGe](https://github.com/zwyang6/SaGe), and [Scenethesis](https://arxiv.org/abs/2505.02836) all make structured scene relationships or vision-guided layout feedback central to spatial reasoning. The lean implementation applies that lesson without importing their training stacks: it computes deterministic world-space facts, checks claimed support against geometry, and gives those facts to Gemini alongside the render.
+That direction agrees with recent spatial work: [Agentic 3D Scene Generation](https://spatctxvlm.github.io/project_page/), [View-on-Graph](https://ojs.aaai.org/index.php/AAAI/article/view/37677), [SceneAssistant](https://github.com/ROUJINN/SceneAssistant), and [3DGraphLLM](https://github.com/CognitiveAISystems/3DGraphLLM) externalize spatial context and use render feedback rather than rely on an LLM's implicit geometry. SeeIn applies that lesson without importing their training stacks: it keeps object/relationship constraints, measures exact GLBs, computes deterministic world-space facts, and gives those facts to Gemini alongside the render.
 
 Mesh-derived static bounds are now implemented by parsing the exact GLB and following its scene/node transforms. The next spatial upgrade should add renderer-derived depth, instance masks, occlusion, or contact evidence—not replace measured geometry with a generic graph database.
 

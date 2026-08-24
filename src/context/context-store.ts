@@ -8,6 +8,7 @@ import type {
   SceneManifest,
   SpatialReport,
 } from "../contracts.js";
+import type { UserPreferenceProfile, WorkflowGraphState } from "../workflow/graph-contracts.js";
 
 export interface AssetRecord {
   spec: AssetSpec;
@@ -50,6 +51,10 @@ export interface ContextStore {
   ): Promise<void>;
   storeQa(projectId: string, revision: number, inspection: Inspection): Promise<void>;
   storeSpatial(projectId: string, revision: number, report: SpatialReport): Promise<void>;
+  findGraphState(projectId: string): Promise<WorkflowGraphState | null>;
+  storeGraphState(state: WorkflowGraphState): Promise<void>;
+  findUserPreferenceProfile(userId: string): Promise<UserPreferenceProfile | null>;
+  storeUserPreferenceProfile(profile: UserPreferenceProfile): Promise<void>;
 }
 
 export class MemoryContextStore implements ContextStore {
@@ -62,6 +67,8 @@ export class MemoryContextStore implements ContextStore {
   readonly renders: Array<{ projectId: string; revision: number; path: string }> = [];
   readonly reports: Array<{ projectId: string; revision: number; inspection: Inspection }> = [];
   readonly spatial: Array<{ projectId: string; revision: number; report: SpatialReport }> = [];
+  readonly graphStates = new Map<string, WorkflowGraphState>();
+  readonly userPreferences = new Map<string, UserPreferenceProfile>();
 
   async migrate(): Promise<void> {}
   async close(): Promise<void> {}
@@ -154,5 +161,21 @@ export class MemoryContextStore implements ContextStore {
 
   async storeSpatial(projectId: string, revision: number, report: SpatialReport): Promise<void> {
     this.spatial.push({ projectId, revision, report });
+  }
+
+  async findGraphState(projectId: string): Promise<WorkflowGraphState | null> {
+    return structuredClone(this.graphStates.get(projectId) ?? null);
+  }
+
+  async storeGraphState(state: WorkflowGraphState): Promise<void> {
+    this.graphStates.set(state.projectId, structuredClone(state));
+  }
+
+  async findUserPreferenceProfile(userId: string): Promise<UserPreferenceProfile | null> {
+    return structuredClone(this.userPreferences.get(userId) ?? null);
+  }
+
+  async storeUserPreferenceProfile(profile: UserPreferenceProfile): Promise<void> {
+    this.userPreferences.set(profile.userId, structuredClone(profile));
   }
 }

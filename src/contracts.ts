@@ -260,7 +260,12 @@ export type Inspection = z.infer<typeof InspectionSchema>;
 
 export const WorkflowStageSchema = z.enum([
   "created",
+  "clarifying",
+  "awaiting_clarification",
   "researching",
+  "planning_research",
+  "auditing_research",
+  "awaiting_research_approval",
   "planning",
   "resolving_assets",
   "generating_assets",
@@ -269,6 +274,7 @@ export const WorkflowStageSchema = z.enum([
   "inspecting",
   "refining",
   "rendering_final",
+  "awaiting_feedback",
   "completed",
   "failed",
 ]);
@@ -289,6 +295,8 @@ export const ProjectRecordSchema = z.object({
   projectId: z.string(),
   runId: z.string(),
   prompt: z.string().min(1),
+  userId: z.string().min(1).max(128).default("local-user"),
+  parentProjectId: z.string().optional(),
   slug: z.string(),
   root: z.string(),
   status: WorkflowStageSchema,
@@ -303,6 +311,7 @@ export type ProjectRecord = z.infer<typeof ProjectRecordSchema>;
 
 export const CreateProjectRequestSchema = z.object({
   prompt: z.string().trim().min(3).max(4000),
+  userId: z.string().trim().min(1).max(128).default("local-user"),
 });
 
 export interface ReferenceArtifact {

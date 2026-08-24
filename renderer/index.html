@@ -16,6 +16,15 @@
         </div>
         <div id="state-controls" class="state-controls" aria-label="Scene states"></div>
       </header>
+      <aside id="workflow-panel" class="workflow-panel" hidden aria-live="polite">
+        <div class="workflow-panel__header">
+          <span class="eyebrow">Guided build</span>
+          <strong id="workflow-node">Preparing…</strong>
+        </div>
+        <ol id="workflow-steps" class="workflow-steps"></ol>
+        <p id="workflow-guidance" class="workflow-guidance"></p>
+        <div id="workflow-action"></div>
+      </aside>
       <div id="status" class="status">Loading assets…</div>
     </main>
     <script type="module" src="/main.ts"></script>

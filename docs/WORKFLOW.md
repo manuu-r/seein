@@ -1,27 +1,28 @@
 # Workflow and contracts
 
-## State machine
+## Interaction graph
 
-The workflow stages are:
+The normal interactive path is:
 
-1. `created`
-2. `researching`
-3. `planning`
-4. `resolving_assets`
-5. `generating_assets`
-6. `assembling`
-7. `rendering_initial`
-8. `inspecting`
-9. `refining` (applies at most one typed patch in the current iteration)
-10. `rendering_final`
-11. repeat `inspecting → refining → rendering_final` until QA passes or the configured bound is reached
-12. `completed` or `failed`
+1. `intake → clarify-intent → await-clarification`
+2. user answer resumes at `plan-research`
+3. three `research-perspectives` execute concurrently
+4. `synthesize-research → await-research-approval`
+5. approval resumes at `generate-scene`
+6. scene planning, asset resolution/generation, assembly, rendering, and bounded visual QA execute
+7. `visual-qa → await-feedback`
+8. acceptance completes; revision feedback starts a linked project with the user's explicit preferences
+
+`graph/state.json` and ClickHouse carry the exact cursor, wait reason, typed notes, intent, evidence dossier, and progress steps. Gemini works within nodes; `graph-state.ts` owns all valid edges. The direct `orchestrator.run()` path remains for deterministic CLI/CI smoke tests and omits the human interrupts.
 
 Every produced render is inspected, including the last render after a correction. Every transition is appended to both the project event log and the configured context store. A restarted implementation can reconstruct the visible run history without overwriting prior evidence. If the final allowed inspection still requests a fix, the project completes with `finalQaVerdict: "fix"` and `qaExhausted: true` instead of silently claiming success.
 
 ## Bounded inputs
 
 - Reference images: 5 by default.
+- Clarification questions: 1–4 in one turn for the MVP.
+- Research perspectives: exactly 3 concurrent branches.
+- Research follow-ups: configurable from 1–3 total rounds; 2 by default.
 - Planned scene objects: 8 by default.
 - Asset recipe parts: 16 per asset.
 - Inspection iterations: configurable from 1–4; 2 by default, allowing one correction plus one verification inspection.
@@ -31,8 +32,11 @@ Every produced render is inspected, including the last render after a correction
 ## Cache keys
 
 ```text
-research = sha256(normalized prompt + research schema version + research model)
-plan     = sha256(prompt + research hash + plan schema + planning models)
+clarify  = sha256(normalized prompt + explicit preference profile + clarifier identity)
+intent   = sha256(prompt + clarification + answers + preference profile)
+branch   = sha256(intent + perspective agenda + research model)
+dossier  = sha256(intent + three branch results + synthesis model)
+plan     = sha256(prompt + approved dossier hash + intent + planning model)
 asset    = sha256(normalized asset recipe + Blender driver version + asset schema)
 render   = sha256(canonical scene + renderer and capture identities)
 inspect  = sha256(canonical scene + asset plan + spatial facts + render hash + inspector model)
@@ -70,10 +74,17 @@ Before Gemini inspection, the backend transforms the exact GLB-derived local AAB
 
 ## Research collection
 
-Gemini Google Search grounding provides textual sources and image-search chunks. The backend merges the grounding metadata with the structured model response, downloads no more than the configured reference count, records individual failures rather than failing the research stage, and writes:
+Gemini Google Search grounding provides textual sources, claim-support indices, and image-search chunks. The backend maps findings to the exact returned grounding chunks, refuses unbound findings, synthesizes object studies without allowing new URLs, then applies a deterministic readiness gate. The three perspectives answer separate self-question sets for visual identity, construction/materials, and scale/space. Only an approved dossier reaches scene planning.
+
+The backend downloads no more than the configured reference count, records individual failures rather than failing the scene-generation stage, and writes:
 
 ```text
 research/brief.json
+research/intent.json
+research/agenda.json
+research/dossier.json
+research/readiness.json
+research/perspectives/*.json
 research/notes.md
 research/sources.json
 research/references/index.json

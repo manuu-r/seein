@@ -24,6 +24,40 @@ interface Manifest {
   transitions: Array<{ from: string; to: string; durationMs: number }>;
 }
 
+interface WorkflowGraphState {
+  sequence: number;
+  currentNode: string;
+  status: "running" | "waiting" | "completed" | "failed";
+  guidance: string;
+  steps: Array<{ id: string; label: string; status: string; summary: string }>;
+  clarification?: {
+    summary: string;
+    questions: Array<{ id: string; question: string; reason: string; options: string[]; required: boolean }>;
+  };
+  researchDossier?: {
+    brief: {
+      sources: Array<{ url: string; title: string }>;
+      references: Array<{ imageUrl: string; sourceUrl: string; title: string }>;
+    };
+    objectStudies: Array<{ id: string; name: string; identityMarkers: string[] }>;
+    readiness: {
+      decision: "ready" | "needs-research" | "needs-user";
+      score: number;
+      checks: Array<{ id: string; label: string; passed: boolean; evidence: string }>;
+      gaps: string[];
+    };
+  };
+  finalSceneRevision?: number;
+  finalInspection?: { verdict: string; issue: string; evidence: string };
+  qaExhausted?: boolean;
+  nextProjectId?: string;
+}
+
+interface InteractionResponse {
+  state: WorkflowGraphState;
+  sceneUrl: string;
+}
+
 declare global {
   interface Window {
     __SEEIN_READY__?: boolean;
@@ -35,6 +69,11 @@ const viewport = requiredElement("#viewport");
 const status = requiredElement("#status");
 const title = requiredElement("#scene-title");
 const stateControls = requiredElement("#state-controls");
+const workflowPanel = requiredElement("#workflow-panel");
+const workflowNode = requiredElement("#workflow-node");
+const workflowSteps = requiredElement("#workflow-steps");
+const workflowGuidance = requiredElement("#workflow-guidance");
+const workflowAction = requiredElement("#workflow-action");
 
 window.__SEEIN_READY__ = false;
 window.__SEEIN_ERRORS__ = [];
@@ -48,8 +87,15 @@ void start().catch((error: unknown) => {
 });
 
 async function start(): Promise<void> {
-  const manifestUrl = new URLSearchParams(location.search).get("manifest");
-  if (!manifestUrl) throw new Error("Missing ?manifest= URL");
+  const query = new URLSearchParams(location.search);
+  const manifestUrl = query.get("manifest");
+  const projectId = query.get("project");
+  if (manifestUrl) return renderManifest(manifestUrl);
+  if (projectId) return runGuidedViewer(projectId);
+  throw new Error("Missing ?manifest= or ?project= URL");
+}
+
+async function renderManifest(manifestUrl: string): Promise<void> {
   const response = await fetch(manifestUrl);
   if (!response.ok) throw new Error(`Manifest request failed: ${response.status}`);
   const manifest = (await response.json()) as Manifest;
@@ -141,6 +187,316 @@ async function start(): Promise<void> {
     renderer.setSize(innerWidth, innerHeight);
     labelRenderer.setSize(innerWidth, innerHeight);
   });
+}
+
+async function runGuidedViewer(projectId: string): Promise<void> {
+  document.body.classList.add("workflow-mode");
+  workflowPanel.hidden = false;
+  title.textContent = "Shaping your visualization";
+  status.textContent = "Waiting for the backend graph…";
+  let lastSequence = -1;
+  let sceneMounted = false;
+  let stopped = false;
+
+  const refresh = async (): Promise<void> => {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/interaction`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`Interaction request failed: ${response.status}`);
+    const interaction = (await response.json()) as InteractionResponse;
+    if (interaction.state.sequence !== lastSequence) {
+      lastSequence = interaction.state.sequence;
+      renderWorkflowAction(projectId, interaction.state, refresh);
+    }
+    if (!sceneMounted && interaction.state.finalSceneRevision) {
+      sceneMounted = true;
+      await renderManifest(interaction.sceneUrl);
+    } else if (!sceneMounted) {
+      status.textContent = graphStatus(interaction.state);
+      window.__SEEIN_READY__ = true;
+    }
+    stopped = interaction.state.status === "completed" || interaction.state.status === "failed";
+  };
+
+  await refresh();
+  const timer = window.setInterval(() => {
+    if (stopped) {
+      window.clearInterval(timer);
+      return;
+    }
+    void refresh().catch((error: unknown) => showWorkflowError(error));
+  }, 1500);
+}
+
+function renderWorkflowAction(
+  projectId: string,
+  state: WorkflowGraphState,
+  refresh: () => Promise<void>,
+): void {
+  workflowNode.textContent = humanize(state.currentNode);
+  workflowGuidance.textContent = state.guidance;
+  workflowSteps.replaceChildren(
+    ...state.steps.map((step) => {
+      const item = document.createElement("li");
+      item.className = "workflow-step";
+      item.dataset.status = step.status;
+      item.textContent = step.label;
+      return item;
+    }),
+  );
+  workflowAction.replaceChildren();
+
+  if (state.currentNode === "await-clarification" && state.clarification) {
+    const form = document.createElement("form");
+    form.className = "workflow-card";
+    const heading = document.createElement("h2");
+    heading.textContent = state.clarification.summary;
+    form.append(heading);
+    for (const question of state.clarification.questions) {
+      const label = document.createElement("label");
+      label.htmlFor = `answer-${question.id}`;
+      label.append(document.createTextNode(question.question));
+      const reason = document.createElement("span");
+      reason.className = "workflow-reason";
+      reason.textContent = `Why I’m asking: ${question.reason}`;
+      label.append(reason);
+      if (question.options.length > 0) {
+        const options = document.createElement("span");
+        options.className = "workflow-options";
+        options.textContent = `Useful starting points: ${question.options.join(" · ")}`;
+        label.append(options);
+      }
+      const answer = document.createElement("textarea");
+      answer.id = `answer-${question.id}`;
+      answer.name = question.id;
+      answer.rows = 2;
+      answer.required = question.required;
+      label.append(answer);
+      form.append(label);
+    }
+    const extra = document.createElement("textarea");
+    extra.name = "additionalContext";
+    extra.rows = 2;
+    extra.placeholder = "Anything else the visualization should respect (optional)";
+    const continueButton = actionButton("Continue to research");
+    continueButton.type = "submit";
+    form.append(extra, continueButton);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const data = new FormData(form);
+      const answers = state.clarification!.questions.map((question) => ({
+        questionId: question.id,
+        answer: String(data.get(question.id) ?? "").trim(),
+      })).filter((answer) => answer.answer);
+      void submitWorkflowAction(
+        form,
+        `/api/projects/${encodeURIComponent(projectId)}/clarifications`,
+        { answers, additionalContext: String(data.get("additionalContext") ?? "").trim() },
+        refresh,
+      );
+    });
+    workflowAction.append(form);
+    return;
+  }
+
+  if (state.currentNode === "await-research-approval" && state.researchDossier) {
+    const dossier = state.researchDossier;
+    const card = document.createElement("section");
+    card.className = "workflow-card";
+    const heading = document.createElement("h2");
+    heading.textContent = `Evidence readiness ${Math.round(dossier.readiness.score * 100)}%`;
+    card.append(heading);
+    for (const check of dossier.readiness.checks) {
+      const row = document.createElement("div");
+      row.className = "readiness-check";
+      row.dataset.passed = String(check.passed);
+      const text = document.createElement("div");
+      const label = document.createElement("strong");
+      label.textContent = check.label;
+      const evidence = document.createElement("div");
+      evidence.className = "workflow-reason";
+      evidence.textContent = check.evidence;
+      text.append(label, evidence);
+      row.append(text);
+      card.append(row);
+    }
+    const objectSummary = document.createElement("p");
+    objectSummary.textContent = `Object studies: ${dossier.objectStudies.map((study) => study.name).join(", ")}.`;
+    card.append(objectSummary);
+    const references = document.createElement("div");
+    references.className = "reference-links";
+    for (const reference of dossier.brief.references.slice(0, 6)) {
+      const link = document.createElement("a");
+      link.href = reference.sourceUrl;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = reference.title;
+      references.append(link);
+    }
+    card.append(references);
+    const feedback = document.createElement("textarea");
+    feedback.rows = 2;
+    feedback.placeholder = "What evidence is still missing? (required only for more research)";
+    const actions = document.createElement("div");
+    actions.className = "workflow-actions";
+    const approve = actionButton("Approve generation");
+    approve.disabled = dossier.readiness.decision !== "ready";
+    const more = actionButton("Research this gap", "secondary");
+    actions.append(approve, more);
+    card.append(feedback, actions);
+    approve.addEventListener("click", () => void submitWorkflowAction(
+      card,
+      `/api/projects/${encodeURIComponent(projectId)}/research-decision`,
+      { decision: "approve", feedback: feedback.value.trim() },
+      refresh,
+    ));
+    more.addEventListener("click", () => void submitWorkflowAction(
+      card,
+      `/api/projects/${encodeURIComponent(projectId)}/research-decision`,
+      { decision: "research-more", feedback: feedback.value.trim() },
+      refresh,
+    ));
+    workflowAction.append(card);
+    return;
+  }
+
+  if (state.currentNode === "await-feedback") {
+    const card = document.createElement("section");
+    card.className = "workflow-card";
+    const heading = document.createElement("h2");
+    heading.textContent = state.finalInspection?.verdict === "pass" ? "The bounded visual QA passed" : "Review the final bounded result";
+    const evidence = document.createElement("p");
+    evidence.textContent = state.finalInspection?.evidence || "Explore the scene states and inspect the result.";
+    const categories = document.createElement("div");
+    categories.className = "feedback-categories";
+    for (const category of ["identity", "missing-part", "scale", "layout", "lighting", "label", "teaching-order", "style", "other"]) {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = "category";
+      input.value = category;
+      label.append(input, document.createTextNode(humanize(category)));
+      categories.append(label);
+    }
+    const comment = document.createElement("textarea");
+    comment.rows = 3;
+    comment.placeholder = "What should change, and why?";
+    const preferenceLabel = document.createElement("label");
+    preferenceLabel.textContent = "Optional preference to carry into future projects";
+    const preferenceKey = document.createElement("select");
+    const preferenceOptions: Array<[string, string]> = [
+      ["visual-style", "Visual style"],
+      ["guidance-density", "Guidance density"],
+      ["overview-order", "Teaching order"],
+      ["label-density", "Label density"],
+      ["accuracy-priority", "Accuracy priority"],
+      ["other", "Other"],
+    ];
+    for (const [value, label] of preferenceOptions) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      preferenceKey.append(option);
+    }
+    const preferenceValue = document.createElement("input");
+    preferenceValue.placeholder = "For example: always begin with a sparse overview";
+    preferenceLabel.append(preferenceKey, preferenceValue);
+    const actions = document.createElement("div");
+    actions.className = "workflow-actions";
+    const accept = actionButton("Accept visualization");
+    const reviseScene = actionButton("Revise scene", "secondary");
+    const reviseIntent = actionButton("Rethink intent", "secondary");
+    actions.append(accept, reviseScene, reviseIntent);
+    card.append(heading, evidence, categories, comment, preferenceLabel, actions);
+    const submit = (decision: string): void => {
+      const selected = [...categories.querySelectorAll<HTMLInputElement>('input:checked')].map((input) => input.value);
+      void submitWorkflowAction(
+        card,
+        `/api/projects/${encodeURIComponent(projectId)}/feedback`,
+        {
+          decision,
+          categories: selected,
+          objectIds: [],
+          comment: comment.value.trim(),
+          preferences: preferenceValue.value.trim()
+            ? [{ key: preferenceKey.value, value: preferenceValue.value.trim() }]
+            : [],
+        },
+        refresh,
+      );
+    };
+    accept.addEventListener("click", () => submit("accept"));
+    reviseScene.addEventListener("click", () => submit("revise-scene"));
+    reviseIntent.addEventListener("click", () => submit("revise-intent"));
+    workflowAction.append(card);
+    return;
+  }
+
+  if (state.currentNode === "completed") {
+    const card = document.createElement("section");
+    card.className = "workflow-card";
+    const message = document.createElement("p");
+    message.textContent = state.nextProjectId
+      ? "Your requested revision has started as a linked project with the same explicit preference profile."
+      : "This visualization is accepted and its reusable evidence, assets, and preferences are indexed.";
+    card.append(message);
+    if (state.nextProjectId) {
+      const link = document.createElement("a");
+      link.className = "workflow-link";
+      link.href = `/api/projects/${encodeURIComponent(state.nextProjectId)}/view`;
+      link.textContent = "Open linked revision";
+      card.append(link);
+    }
+    workflowAction.append(card);
+  }
+}
+
+async function submitWorkflowAction(
+  container: HTMLElement,
+  url: string,
+  body: unknown,
+  refresh: () => Promise<void>,
+): Promise<void> {
+  for (const button of container.querySelectorAll<HTMLButtonElement>("button")) button.disabled = true;
+  container.querySelector(".workflow-error")?.remove();
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const result = await response.json() as { error?: string };
+    if (!response.ok) throw new Error(result.error || `Request failed: ${response.status}`);
+    await refresh();
+  } catch (error) {
+    const message = document.createElement("p");
+    message.className = "workflow-error";
+    message.textContent = error instanceof Error ? error.message : String(error);
+    container.append(message);
+    for (const button of container.querySelectorAll<HTMLButtonElement>("button")) button.disabled = false;
+  }
+}
+
+function actionButton(label: string, className = ""): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  return button;
+}
+
+function graphStatus(state: WorkflowGraphState): string {
+  if (state.status === "waiting") return `Waiting: ${humanize(state.currentNode)}`;
+  if (state.status === "failed") return "The backend graph stopped; see the guidance panel.";
+  return `${humanize(state.currentNode)}…`;
+}
+
+function humanize(value: string): string {
+  return value.replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function showWorkflowError(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  status.textContent = message;
+  status.style.color = "#fca5a5";
 }
 
 function addEnvironment(root: THREE.Group, manifest: Manifest): void {
