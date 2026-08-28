@@ -21,9 +21,11 @@ flowchart TD
     D --> E1["Visual identity research"]
     D --> E2["Object and material research"]
     D --> E3["Scale and spatial research"]
+    D --> E4["Reference-image search"]
     E1 --> F["Synthesize evidence dossier"]
     E2 --> F
     E3 --> F
+    E4 --> F
     F --> G{"Research readiness gate"}
     G -->|"evidence gap"| D
     G -->|"user decision needed"| H["Wait for research approval"]
@@ -81,7 +83,7 @@ Planning a Blender recipe in the same call that first researches the topic is pr
 2. **Objects and materials:** required components, construction, materials, color, topology implications, common confusions.
 3. **Scale and space:** real or plausible dimensions, support/contact relationships, relative scale, layout constraints, and useful viewpoints.
 
-The three branches are independent and run concurrently. Each produces source-bound findings and targeted reference-image candidates. Synthesis merges duplicate sources, detects contradictions, and creates one `ObjectStudy` per planned object candidate.
+The three evidence branches are independent and run concurrently on Gemini 3.7 Flash. A fourth concurrent node uses Gemini 3.1 Flash Image for grounded reference-image discovery. The image node contributes returned image chunks and required Google attribution, not free-form claims or structured model output. Synthesis merges duplicate sources, detects contradictions, and creates one `ObjectStudy` per planned object candidate.
 
 The readiness gate is deterministic. Generation is forbidden until all required checks pass:
 
@@ -94,7 +96,7 @@ The readiness gate is deterministic. Generation is forbidden until all required 
 
 The audit may request one bounded follow-up research round. If the remaining gap depends on taste or intent rather than public evidence, the graph asks the user instead of searching indefinitely.
 
-Gemini Google Search and Image Search grounding remain the default discovery path. Firecrawl is an optional targeted extractor only when an approved source is JavaScript-heavy or a user explicitly requests deep traversal; it is not a second default search engine.
+Gemini Google Web Search grounding on 3.7 Flash and Google Image Search grounding on 3.1 Flash Image remain the default discovery path. Firecrawl is an optional targeted extractor only when an approved source is JavaScript-heavy or a user explicitly requests deep traversal; it is not a second default search engine.
 
 ## Guided visualization and feedback
 
@@ -113,7 +115,7 @@ Adaptation stays inspectable. The project response shows which explicit preferen
 ## Concurrency and cache rules
 
 - clarification and research-agenda generation are sequential because the latter depends on answered intent;
-- research perspectives fan out concurrently and join before synthesis;
+- three research perspectives and one reference-image search fan out concurrently and join before synthesis;
 - reference downloads run concurrently with source/artifact writes after synthesis;
 - asset lookup is bulk and can overlap plan artifact writes;
 - missing assets stay in one Blender batch;

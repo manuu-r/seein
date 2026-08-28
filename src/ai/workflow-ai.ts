@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import {
   GoogleGenAI,
+  Modality,
   ThinkingLevel,
   type GroundingChunk,
   type GroundingSupport,
@@ -22,16 +23,27 @@ import {
   ClarificationTurnSchema,
   IntentAndAgendaSchema,
   ResearchDossierDraftSchema,
+  ReferenceDiscoverySchema,
   ResearchPerspectiveResultSchema,
   type ClarificationAnswer,
   type ClarificationTurn,
   type IntentAndAgenda,
   type IntentFrame,
   type ResearchDossier,
+  type ReferenceDiscovery,
+  type ResearchAgenda,
   type ResearchPerspective,
   type ResearchPerspectiveResult,
   type UserPreferenceProfile,
 } from "../workflow/graph-contracts.js";
+
+/** A downloaded reference image, bound to the object study it depicts. */
+export interface PlannerReferenceImage {
+  studyId: string;
+  studyName: string;
+  mediaType: string;
+  data: Buffer;
+}
 
 export interface WorkflowAI {
   readonly identity: string;
@@ -40,6 +52,7 @@ export interface WorkflowAI {
   readonly inspectionIdentity: string;
   readonly clarificationIdentity: string;
   readonly deepResearchIdentity: string;
+  readonly referenceResearchIdentity: string;
   clarify(prompt: string, profile: UserPreferenceProfile): Promise<ClarificationTurn>;
   prepareIntent(
     prompt: string,
@@ -49,6 +62,7 @@ export interface WorkflowAI {
     profile: UserPreferenceProfile,
   ): Promise<IntentAndAgenda>;
   researchPerspective(intent: IntentFrame, perspective: ResearchPerspective): Promise<ResearchPerspectiveResult>;
+  researchReferences(intent: IntentFrame, agenda: ResearchAgenda): Promise<ReferenceDiscovery>;
   synthesizeResearch(
     intent: IntentFrame,
     perspectives: ResearchPerspectiveResult[],
@@ -60,6 +74,7 @@ export interface WorkflowAI {
     maxObjects: number,
     intent?: IntentFrame,
     dossier?: ResearchDossier,
+    referenceImages?: PlannerReferenceImage[],
   ): Promise<ScenePlan>;
   inspect(
     manifest: SceneManifest,
@@ -76,17 +91,19 @@ export class GeminiWorkflowAI implements WorkflowAI {
   readonly inspectionIdentity: string;
   readonly clarificationIdentity: string;
   readonly deepResearchIdentity: string;
+  readonly referenceResearchIdentity: string;
   private readonly ai: GoogleGenAI;
 
   constructor(private readonly config: Config) {
     if (!config.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is required for AI_DRIVER=gemini");
     this.ai = new GoogleGenAI({ apiKey: config.GEMINI_API_KEY });
-    this.identity = `gemini:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_PLANNER_MODEL}:${config.GEMINI_INSPECTOR_MODEL}`;
-    this.researchIdentity = `gemini-research:${config.GEMINI_RESEARCH_MODEL}:v2`;
+    this.identity = `gemini:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_REFERENCE_MODEL}:${config.GEMINI_PLANNER_MODEL}:${config.GEMINI_INSPECTOR_MODEL}`;
+    this.researchIdentity = `gemini-research:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_REFERENCE_MODEL}:v4`;
     this.planningIdentity = `gemini-planning:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_PLANNER_MODEL}:v2`;
     this.inspectionIdentity = `gemini-inspection:${config.GEMINI_INSPECTOR_MODEL}:v2`;
     this.clarificationIdentity = `gemini-clarification:${config.GEMINI_PLANNER_MODEL}:v1`;
-    this.deepResearchIdentity = `gemini-perspective-research:${config.GEMINI_RESEARCH_MODEL}:v1`;
+    this.deepResearchIdentity = `gemini-perspective-research:${config.GEMINI_RESEARCH_MODEL}:v3`;
+    this.referenceResearchIdentity = `gemini-reference-research:${config.GEMINI_REFERENCE_MODEL}:v1`;
   }
 
   async clarify(prompt: string, profile: UserPreferenceProfile): Promise<ClarificationTurn> {
@@ -100,7 +117,7 @@ Explicit saved preferences: ${JSON.stringify(profile.preferences)}
 Ask 1-4 concise, high-information questions. Cover the most consequential uncertainties first. Give a short reason for each question and useful options where they reduce effort, while always allowing free text. Do not ask for facts that can be found through web research. Do not plan assets or a scene yet. Record low-impact defaults as assumptions.`,
       config: {
         responseMimeType: "application/json",
-        responseJsonSchema: z.toJSONSchema(ClarificationTurnSchema),
+        responseJsonSchema: toGeminiJsonSchema(ClarificationTurnSchema),
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
@@ -132,7 +149,7 @@ The agenda must contain exactly these perspective IDs:
 For each perspective, write 2-8 self-questions and search hints whose answers would change asset selection or spatial evaluation. Evaluation criteria must be observable in the final render or measured scene graph.`,
       config: {
         responseMimeType: "application/json",
-        responseJsonSchema: z.toJSONSchema(IntentAndAgendaSchema),
+        responseJsonSchema: toGeminiJsonSchema(IntentAndAgendaSchema),
         thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
       },
     });
@@ -143,9 +160,12 @@ For each perspective, write 2-8 self-questions and search hints whose answers wo
     intent: IntentFrame,
     perspective: ResearchPerspective,
   ): Promise<ResearchPerspectiveResult> {
-    const result = await this.ai.models.generateContent({
+    // A demanding responseJsonSchema suppresses tool use: the model answers from
+    // parametric knowledge and never issues a search, so grounding comes back empty.
+    // Ground in free text first, then convert that grounded prose into the contract.
+    const grounded = await this.ai.models.generateContent({
       model: this.config.GEMINI_RESEARCH_MODEL,
-      contents: `Research one evidence branch for a 3D visualization. Answer the supplied self-questions using web and image search before drawing conclusions. This branch is research only: do not generate a scene plan or Blender recipe.
+      contents: `Research one evidence branch for a 3D visualization. Answer the supplied self-questions using grounded web search before drawing conclusions. This branch is research only: do not generate a scene plan or Blender recipe.
 
 Approved intent: ${JSON.stringify(intent)}
 Perspective: ${JSON.stringify(perspective)}
@@ -153,18 +173,39 @@ Perspective: ${JSON.stringify(perspective)}
 Requirements:
 - Prefer primary, institutional, museum, manufacturer, standards, or technically authoritative sources.
 - Bind every finding to one or more exact source URLs actually returned by search.
-- Collect references that reveal silhouette, construction, material, scale, or spatial relationships—not merely attractive mood images.
+- Describe which views would reveal silhouette, construction, material, scale, or spatial relationships; a separate image-search node collects the actual images.
 - Identify common visual confusions and uncertainty.
 - Return object candidates only when the evidence suggests they are visually or spatially necessary.`,
       config: {
-        tools: [{ googleSearch: { searchTypes: { webSearch: {}, imageSearch: {} } } }],
-        responseMimeType: "application/json",
-        responseJsonSchema: z.toJSONSchema(ResearchPerspectiveResultSchema),
+        tools: [{ googleSearch: {} }],
         thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
       },
     });
-    const parsed = ResearchPerspectiveResultSchema.parse(parseJsonResponse(result.text));
-    const grounding = result.candidates?.[0]?.groundingMetadata;
+    const grounding = grounded.candidates?.[0]?.groundingMetadata;
+    // The extraction step paraphrases, so grounding-support text spans no longer match
+    // the claims. Cite the grounded URLs explicitly instead of relying on span overlap.
+    const groundedSourceList = (grounding?.groundingChunks ?? [])
+      .flatMap((chunk) => (chunk.web?.uri ? [`- ${chunk.web.title || "source"}: ${chunk.web.uri}`] : []))
+      .join("\n");
+    const structured = await this.ai.models.generateContent({
+      model: this.config.GEMINI_RESEARCH_MODEL,
+      contents: `Convert this grounded research into the required structure. Use only claims that appear in the research below; do not add knowledge of your own.
+
+Every finding's sourceUrls must be copied verbatim from this list of grounded sources. Do not shorten, rewrite, or invent a URL, and drop any finding you cannot attribute to one of them.
+
+List a question in unansweredQuestions only if it blocks building the scene: it would change which objects exist, their geometry or scale, or how they are positioned relative to each other. Background, technique variation, and detail below the chosen fidelity level are not blocking; leave them out. Return an empty list when the evidence is sufficient to build the scene.
+${groundedSourceList}
+
+Perspective id: ${perspective.id}
+Grounded research:
+${grounded.text ?? ""}`,
+      config: {
+        responseMimeType: "application/json",
+        responseJsonSchema: toGeminiJsonSchema(ResearchPerspectiveResultSchema),
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
+    });
+    const parsed = ResearchPerspectiveResultSchema.parse(parseJsonResponse(structured.text));
     return mergePerspectiveGrounding(
       parsed,
       grounding?.groundingChunks ?? [],
@@ -173,10 +214,38 @@ Requirements:
     );
   }
 
+  async researchReferences(intent: IntentFrame, agenda: ResearchAgenda): Promise<ReferenceDiscovery> {
+    const result = await this.ai.models.generateContent({
+      model: this.config.GEMINI_REFERENCE_MODEL,
+      contents: `Use Google Image Search to find a small, diverse visual reference set for this approved 3D visualization intent. Search for canonical views, construction details, material close-ups, scale cues, and spatial relationships. Prefer museum, institutional, manufacturer, standards, or technically authoritative source pages. Avoid mood images and AI-generated lookalikes. Do not create a new image; return only a short textual search summary.
+
+Approved intent: ${JSON.stringify(intent)}
+Research agenda: ${JSON.stringify(agenda)}`,
+      config: {
+        tools: [{ googleSearch: { searchTypes: { webSearch: {}, imageSearch: {} } } }],
+        responseModalities: [Modality.TEXT],
+        // Gemini 3.1 Flash Image supports MINIMAL or HIGH, unlike 3.7 Flash's LOW/MEDIUM/HIGH ladder.
+        thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+      },
+    });
+    const grounding = result.candidates?.[0]?.groundingMetadata;
+    return referenceDiscoveryFromGrounding(
+      grounding?.groundingChunks ?? [],
+      this.config.GEMINI_REFERENCE_MODEL,
+      [...(grounding?.webSearchQueries ?? []), ...(grounding?.imageSearchQueries ?? [])],
+      grounding?.searchEntryPoint?.renderedContent,
+    );
+  }
+
   async synthesizeResearch(
     intent: IntentFrame,
     perspectives: ResearchPerspectiveResult[],
   ): Promise<Omit<ResearchDossier, "perspectives" | "readiness" | "generatedAt">> {
+    // Grounded source URLs are opaque redirect URIs, so the model has to copy them
+    // verbatim; anything it rewrites is filtered out later as ungrounded.
+    const citableUrls = uniqueBy(perspectives.flatMap((result) => result.sources), (source) => source.url)
+      .map((source) => `- ${source.title}: ${source.url}`)
+      .join("\n");
     const result = await this.ai.models.generateContent({
       model: this.config.GEMINI_PLANNER_MODEL,
       contents: `Synthesize these three grounded research branches into a generation dossier. Do not invent or alter URLs, and do not design primitive geometry yet.
@@ -184,10 +253,13 @@ Requirements:
 Approved intent: ${JSON.stringify(intent)}
 Research branches: ${JSON.stringify(perspectives)}
 
-Create one object study for each visually necessary object. Each study must explain identifying markers, components, materials, proportions/scale, spatial relationships, source URLs, reference-image URLs, and remaining uncertainty. For every approved intent.mustHave string, create exactly one intentCoverage entry that repeats the requirement verbatim and maps it to existing object-study IDs. Merge duplicates, expose contradictions, and mark every truly blocking unanswered question. The brief should be concise enough for the scene planner but retain concrete visual and spatial evidence.`,
+Every sourceUrls entry must be copied verbatim from this list. Do not shorten, rewrite, or substitute a publisher URL, and give every object study at least one of them:
+${citableUrls}
+
+Create one object study for each visually necessary object. Each study must explain identifying markers, components, materials, proportions/scale, spatial relationships, source URLs, reference-image URLs, and remaining uncertainty. For every approved intent.mustHave string, create exactly one intentCoverage entry that repeats the requirement verbatim and maps it to existing object-study IDs. Merge duplicates and expose contradictions. A question belongs in unresolvedQuestions only if it blocks generation: it would change which objects exist, their geometry or scale, or how they are positioned relative to each other. Curiosity, historical background, clinical technique variation, and detail that the chosen fidelity level omits are not blocking; leave them out. Return an empty list when the evidence is sufficient to build the scene. The brief should be concise enough for the scene planner but retain concrete visual and spatial evidence.`,
       config: {
         responseMimeType: "application/json",
-        responseJsonSchema: z.toJSONSchema(ResearchDossierDraftSchema),
+        responseJsonSchema: toGeminiJsonSchema(ResearchDossierDraftSchema),
         thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
       },
     });
@@ -196,19 +268,29 @@ Create one object study for each visually necessary object. Each study must expl
   }
 
   async research(prompt: string): Promise<ResearchBrief> {
-    const result = await this.ai.models.generateContent({
+    const grounded = await this.ai.models.generateContent({
       model: this.config.GEMINI_RESEARCH_MODEL,
       contents: `Research this visual scene concept for 3D reconstruction: ${prompt}\n
-Return a concise visual brief. Focus on recognizable shapes, spatial relationships, scale, materials, lighting, and historically or technically important details. Find a small diverse set of reference images. Every reference must contain both the direct image URL and the containing source page URL. Do not invent URLs.`,
+Use grounded web search. Focus on recognizable shapes, spatial relationships, scale, materials, lighting, and historically or technically important details. Do not invent URLs. Reference-image discovery is handled by a separate image-search node.`,
       config: {
-        tools: [{ googleSearch: { searchTypes: { webSearch: {}, imageSearch: {} } } }],
-        responseMimeType: "application/json",
-        responseJsonSchema: z.toJSONSchema(ResearchBriefSchema),
+        tools: [{ googleSearch: {} }],
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
-    const brief = ResearchBriefSchema.parse(parseJsonResponse(result.text));
-    const chunks = result.candidates?.flatMap((candidate) => candidate.groundingMetadata?.groundingChunks ?? []) ?? [];
+    const structured = await this.ai.models.generateContent({
+      model: this.config.GEMINI_RESEARCH_MODEL,
+      contents: `Convert this grounded research into a concise visual brief. Use only claims and URLs that appear below; do not add knowledge of your own and do not invent URLs.
+
+Grounded research:
+${grounded.text ?? ""}`,
+      config: {
+        responseMimeType: "application/json",
+        responseJsonSchema: toGeminiJsonSchema(ResearchBriefSchema),
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
+    });
+    const brief = ResearchBriefSchema.parse(parseJsonResponse(structured.text));
+    const chunks = grounded.candidates?.flatMap((candidate) => candidate.groundingMetadata?.groundingChunks ?? []) ?? [];
     return mergeGrounding(brief, chunks);
   }
 
@@ -218,10 +300,9 @@ Return a concise visual brief. Focus on recognizable shapes, spatial relationshi
     maxObjects: number,
     intent?: IntentFrame,
     dossier?: ResearchDossier,
+    referenceImages: PlannerReferenceImage[] = [],
   ): Promise<ScenePlan> {
-    const result = await this.ai.models.generateContent({
-      model: this.config.GEMINI_PLANNER_MODEL,
-      contents: `Create a compact, deterministic Three.js scene plan for this prompt:\n${prompt}\n
+    const planPrompt = `Create a compact, deterministic Three.js scene plan for this prompt:\n${prompt}\n
 Approved intent:\n${JSON.stringify(intent ?? null)}\n
 Research brief:\n${JSON.stringify(research)}\n
 Approved object studies and intent coverage:\n${JSON.stringify(dossier ? {
@@ -240,10 +321,29 @@ Constraints:
 - Use one ambient or hemisphere light and one directional or point light.
 - IDs must use lowercase ASCII letters, digits, hyphens, or underscores and start with a letter.
 - Each object must reference an asset spec ID that exists in the same response.
-- When an approved dossier is present, every asset ID must equal an object-study ID. Do not introduce unresearched decorative assets.`,
+- When an approved dossier is present, every asset ID must equal an object-study ID. Do not introduce unresearched decorative assets.
+${referenceImages.length > 0 ? `
+Reference images follow this text. Each is labelled with the object study it depicts.
+Read proportions, component layout, and characteristic silhouette from the images and
+make the primitives match what you see. Where an image and the written study disagree,
+trust the image for shape and proportion, and the study for naming and relationships.` : ""}`;
+    const result = await this.ai.models.generateContent({
+      model: this.config.GEMINI_PLANNER_MODEL,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: planPrompt },
+            ...referenceImages.flatMap((image) => [
+              { text: `Reference image for object study "${image.studyId}" (${image.studyName}):` },
+              { inlineData: { data: image.data.toString("base64"), mimeType: image.mediaType } },
+            ]),
+          ],
+        },
+      ],
       config: {
         responseMimeType: "application/json",
-        responseJsonSchema: z.toJSONSchema(ScenePlanSchema),
+        responseJsonSchema: toGeminiJsonSchema(ScenePlanSchema),
         thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
       },
     });
@@ -272,7 +372,7 @@ Constraints:
       ],
       config: {
         responseMimeType: "application/json",
-        responseJsonSchema: z.toJSONSchema(InspectionSchema),
+        responseJsonSchema: toGeminiJsonSchema(InspectionSchema),
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
@@ -287,6 +387,7 @@ export class DeterministicWorkflowAI implements WorkflowAI {
   readonly inspectionIdentity = "deterministic-inspection:v1";
   readonly clarificationIdentity = "deterministic-clarification:v1";
   readonly deepResearchIdentity = "deterministic-perspective-research:v1";
+  readonly referenceResearchIdentity = "deterministic-reference-research:v1";
 
   async clarify(prompt: string, _profile: UserPreferenceProfile): Promise<ClarificationTurn> {
     return ClarificationTurnSchema.parse({
@@ -428,6 +529,10 @@ export class DeterministicWorkflowAI implements WorkflowAI {
       ],
       unansweredQuestions: [],
     });
+  }
+
+  async researchReferences(_intent: IntentFrame, _agenda: ResearchAgenda): Promise<ReferenceDiscovery> {
+    return ReferenceDiscoverySchema.parse({ references: [] });
   }
 
   async synthesizeResearch(
@@ -612,29 +717,52 @@ export class DeterministicWorkflowAI implements WorkflowAI {
 }
 
 function mergeGrounding(brief: ResearchBrief, chunks: GroundingChunk[]): ResearchBrief {
-  const merged = structuredClone(brief);
-  for (const chunk of chunks) {
-    if (chunk.web?.uri && chunk.web.title && !merged.sources.some((source) => source.url === chunk.web?.uri)) {
-      merged.sources.push({ url: chunk.web.uri, title: chunk.web.title, note: "Gemini Google Search grounding source" });
-    }
-    if (
-      chunk.image?.imageUri &&
-      chunk.image.sourceUri &&
-      !merged.references.some((reference) => reference.imageUrl === chunk.image?.imageUri)
-    ) {
-      merged.references.push({
+  const sources = uniqueBy(
+    chunks.flatMap((chunk) => chunk.web?.uri
+      ? [{ url: chunk.web.uri, title: chunk.web.title || "Gemini grounded source", note: "Gemini Google Search grounding source" }]
+      : []),
+    (source) => source.url,
+  );
+  const references = groundedImageReferences(chunks);
+  return ResearchBriefSchema.parse({
+    ...brief,
+    sources: sources.slice(0, 12),
+    references: references.slice(0, 8),
+  });
+}
+
+function referenceDiscoveryFromGrounding(
+  chunks: GroundingChunk[],
+  model: string,
+  queries: string[],
+  renderedContent?: string,
+): ReferenceDiscovery {
+  const references = groundedImageReferences(chunks).slice(0, 8);
+  if (references.length > 0 && !renderedContent) {
+    throw new Error("Gemini Image Search returned references without the required search-suggestion attribution");
+  }
+  return ReferenceDiscoverySchema.parse({
+    references,
+    ...(renderedContent
+      ? { searchAttribution: { model, queries: [...new Set(queries)].slice(0, 16), renderedContent } }
+      : {}),
+  });
+}
+
+function groundedImageReferences(chunks: GroundingChunk[]) {
+  return uniqueBy(
+    chunks
+      .filter((chunk): chunk is GroundingChunk & { image: { imageUri: string; sourceUri: string; title?: string; domain?: string } } =>
+        Boolean(chunk.image?.imageUri && chunk.image.sourceUri),
+      )
+      .map((chunk) => ({
         imageUrl: chunk.image.imageUri,
         sourceUrl: chunk.image.sourceUri,
         title: chunk.image.title || chunk.image.domain || "Grounded reference image",
-        relevance: "Gemini image-search grounding reference",
-      });
-    }
-  }
-  return ResearchBriefSchema.parse({
-    ...merged,
-    sources: merged.sources.slice(0, 12),
-    references: merged.references.slice(0, 8),
-  });
+        relevance: "Gemini Image Search grounding reference",
+      })),
+    (reference) => reference.imageUrl,
+  );
 }
 
 function mergePerspectiveGrounding(
@@ -653,19 +781,7 @@ function mergePerspectiveGrounding(
       })),
     (source) => source.url,
   );
-  const groundedReferences = uniqueBy(
-    chunks
-      .filter((chunk): chunk is GroundingChunk & { image: { imageUri: string; sourceUri: string; title?: string; domain?: string } } =>
-        Boolean(chunk.image?.imageUri && chunk.image.sourceUri),
-      )
-      .map((chunk) => ({
-        imageUrl: chunk.image.imageUri,
-        sourceUrl: chunk.image.sourceUri,
-        title: chunk.image.title || chunk.image.domain || "Gemini grounded reference image",
-        relevance: "Gemini Image Search grounding reference",
-      })),
-    (reference) => reference.imageUrl,
-  );
+  const groundedReferences = groundedImageReferences(chunks);
   const allowedSources = new Set(groundedSources.map((source) => source.url));
   const sourceByChunkIndex = new Map(
     chunks.flatMap((chunk, index) => chunk.web?.uri ? [[index, chunk.web.uri] as const] : []),
@@ -720,6 +836,28 @@ function sanitizeDossierDraft(
   const references = uniqueBy(perspectives.flatMap((result) => result.references), (reference) => reference.imageUrl);
   const allowedSources = new Set(sources.map((source) => source.url));
   const allowedReferences = new Set(references.map((reference) => reference.imageUrl));
+  const studies = draft.objectStudies.map((study) => ({
+    ...study,
+    sourceUrls: study.sourceUrls.filter((url) => allowedSources.has(url)),
+    referenceImageUrls: study.referenceImageUrls.filter((url) => allowedReferences.has(url)),
+  }));
+  // A study whose citations all fail the grounded-source filter has no provenance,
+  // so keeping it would assert evidence the dossier cannot show. Drop it and let the
+  // readiness gate see the gap rather than failing the run on a raw schema error.
+  const grounded = studies.filter((study) => study.sourceUrls.length > 0);
+  const dropped = studies.filter((study) => study.sourceUrls.length === 0);
+  if (grounded.length === 0) {
+    throw new Error(
+      `Research synthesis returned ${studies.length} object studies but none cited a grounded source URL`,
+    );
+  }
+  const keptStudyIds = new Set(grounded.map((study) => study.id));
+  const coverage = draft.intentCoverage
+    .map((entry) => ({ ...entry, objectStudyIds: entry.objectStudyIds.filter((id) => keptStudyIds.has(id)) }))
+    .filter((entry) => entry.objectStudyIds.length > 0);
+  if (coverage.length === 0) {
+    throw new Error("Research synthesis left no approved requirement covered by a grounded object study");
+  }
   return ResearchDossierDraftSchema.parse({
     ...draft,
     brief: {
@@ -727,11 +865,12 @@ function sanitizeDossierDraft(
       sources: sources.slice(0, 12),
       references: references.slice(0, 8),
     },
-    objectStudies: draft.objectStudies.map((study) => ({
-      ...study,
-      sourceUrls: study.sourceUrls.filter((url) => allowedSources.has(url)),
-      referenceImageUrls: study.referenceImageUrls.filter((url) => allowedReferences.has(url)),
-    })),
+    objectStudies: grounded,
+    intentCoverage: coverage,
+    unresolvedQuestions: [
+      ...draft.unresolvedQuestions,
+      ...dropped.map((study) => `${study.name} was dropped: no grounded source URL supported it.`.slice(0, 500)),
+    ].slice(0, 8),
   });
 }
 
@@ -743,6 +882,38 @@ function uniqueBy<T>(values: T[], key: (value: T) => string): T[] {
     seen.add(id);
     return true;
   });
+}
+
+// Gemini's responseJsonSchema rejects a request once a schema nests enough array
+// item-count keywords; each one is fine alone, so the limit is on the combination.
+// Fold the bounds into the description instead — the model still sees them, and
+// Zod re-enforces the real constraint when the response is parsed.
+function toGeminiJsonSchema(schema: z.ZodType): Record<string, unknown> {
+  return sanitizeForGemini(z.toJSONSchema(schema)) as Record<string, unknown>;
+}
+
+function sanitizeForGemini(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(sanitizeForGemini);
+  if (!node || typeof node !== "object") return node;
+  const { minItems, maxItems, ...rest } = node as Record<string, unknown>;
+  const sanitized: Record<string, unknown> = Object.fromEntries(
+    Object.entries(rest).map(([key, value]) => [key, sanitizeForGemini(value)]),
+  );
+  const bound = describeItemBound(minItems, maxItems);
+  if (bound) {
+    const existing = typeof sanitized.description === "string" ? `${sanitized.description} ` : "";
+    sanitized.description = `${existing}${bound}`;
+  }
+  return sanitized;
+}
+
+function describeItemBound(minItems: unknown, maxItems: unknown): string {
+  const min = typeof minItems === "number" ? minItems : undefined;
+  const max = typeof maxItems === "number" ? maxItems : undefined;
+  if (min !== undefined && max !== undefined) return `Provide ${min}-${max} items.`;
+  if (min !== undefined) return `Provide at least ${min} items.`;
+  if (max !== undefined) return `Provide at most ${max} items.`;
+  return "";
 }
 
 function parseJsonResponse(text: string | undefined): unknown {

@@ -66,7 +66,7 @@ Live testing caught four problems that fixture-only tests would not reveal:
 
 ## Gemini gate
 
-The Gemini adapter performs grounded web and image research, schema-constrained planning, and screenshot inspection. A live call is intentionally not attempted without `GEMINI_API_KEY`.
+The Gemini adapter uses Gemini 3.7 Flash for grounded structured web research, planning, and screenshot inspection, with a parallel Gemini 3.1 Flash Image call for grounded reference discovery. A live call is intentionally not attempted without `GEMINI_API_KEY`.
 
 After setting the key in `.env`, the production-local acceptance test is:
 

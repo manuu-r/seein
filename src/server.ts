@@ -30,9 +30,7 @@ await app.register(fastifyStatic, {
 app.get("/health", async () => ({ status: "ok" }));
 app.get("/favicon.ico", async (_request, reply) => reply.code(204).send());
 
-app.get("/", async (_request, reply) => {
-  return reply.type("text/html").send(`<!doctype html><html><head><meta charset="utf-8"><title>SeeIn Core</title></head><body style="font-family:system-ui;max-width:760px;margin:60px auto;padding:0 20px"><h1>SeeIn Local Core</h1><p>The backend is ready. POST a prompt to <code>/api/projects</code>, then open its <code>viewerUrl</code>.</p><p><a href="/api/projects">View project JSON</a></p></body></html>`);
-});
+app.get("/", async (_request, reply) => reply.redirect("/viewer/"));
 
 app.get("/api/projects", async () => ({ projects: await services.projects.list() }));
 
@@ -109,6 +107,23 @@ app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/view", asyn
   return reply.redirect(`/viewer/?project=${encodeURIComponent(project.projectId)}`);
 });
 
+app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/checkpoints", async (request, reply) => {
+  const project = await services.projects.load(request.params.projectId);
+  if (!project) return reply.code(404).send({ error: "Project not found" });
+  return { checkpoints: await services.orchestrator.listCheckpoints(project.projectId) };
+});
+
+app.post<{ Params: { projectId: string }; Body: { sequence?: number; fresh?: boolean } }>(
+  "/api/projects/:projectId/resume",
+  async (request, reply) => {
+    const state = await services.orchestrator.resume(request.params.projectId, {
+      sequence: typeof request.body?.sequence === "number" ? request.body.sequence : undefined,
+      fresh: request.body?.fresh === true,
+    });
+    return reply.code(202).send({ state });
+  },
+);
+
 app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/rerun", async (request, reply) => {
   const project = await services.projects.load(request.params.projectId);
   if (!project) return reply.code(404).send({ error: "Project not found" });
@@ -118,7 +133,7 @@ app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/rerun", as
 
 app.setErrorHandler((error, _request, reply) => {
   const normalized = error instanceof Error ? error : new Error(String(error));
-  const isStateConflict = /not waiting|Generation is blocked|reached the configured|requires feedback|requires a short explanation|interaction update is already/i.test(
+  const isStateConflict = /not waiting|still running|No checkpoint at sequence|Generation is blocked|reached the configured|requires feedback|requires a short explanation|interaction update is already|cannot be restarted automatically|No successful checkpoint/i.test(
     normalized.message,
   );
   const status = "issues" in normalized ? 400 : isStateConflict ? 409 : 500;

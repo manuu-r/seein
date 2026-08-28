@@ -3,29 +3,67 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SeeIn Scene Renderer</title>
+    <title>SeeIn</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <main id="app">
       <div id="viewport"></div>
-      <header class="overlay">
-        <div>
-          <span class="eyebrow">SeeIn</span>
-          <h1 id="scene-title">Loading scene…</h1>
+
+      <!-- Prompt entry. Asymmetric split: composition left, prior runs right. -->
+      <section id="launcher" class="launcher" hidden>
+        <div class="launcher__grid">
+          <div class="launcher__compose">
+            <p class="wordmark">SeeIn</p>
+            <h1 class="launcher__title">Describe what you<br />need to see.</h1>
+            <p class="launcher__hint">
+              Intent is clarified, evidence is gathered and audited, then a scene is built
+              and visually checked against it.
+            </p>
+            <form id="launcher-form">
+              <label class="field">
+                <span class="field__label">Subject</span>
+                <textarea
+                  id="launcher-prompt"
+                  rows="3"
+                  required
+                  placeholder="A compact medieval blacksmith workshop with labeled tools"
+                ></textarea>
+              </label>
+              <div id="launcher-examples" class="launcher__examples"></div>
+              <div class="launcher__actions">
+                <button type="submit" id="launcher-submit">Begin</button>
+                <span class="launcher__kbd"><kbd>Ctrl</kbd><kbd>Enter</kbd></span>
+              </div>
+              <p id="launcher-error" class="launcher__error" hidden></p>
+            </form>
+          </div>
+          <aside id="launcher-recent" class="launcher__recent" hidden></aside>
         </div>
+      </section>
+
+      <!-- Process console. Anchored to the left edge, not floating over the scene. -->
+      <aside id="workflow-panel" class="console" hidden aria-live="polite">
+        <header class="console__head">
+          <p class="wordmark">SeeIn</p>
+          <strong id="workflow-node" class="console__node">Preparing</strong>
+        </header>
+        <ol id="workflow-steps" class="ledger"></ol>
+        <p id="workflow-guidance" class="console__guidance"></p>
+        <div id="workflow-action" class="console__action"></div>
+      </aside>
+
+      <header class="scene-head">
+        <h1 id="scene-title">Loading scene</h1>
         <div id="state-controls" class="state-controls" aria-label="Scene states"></div>
       </header>
-      <aside id="workflow-panel" class="workflow-panel" hidden aria-live="polite">
-        <div class="workflow-panel__header">
-          <span class="eyebrow">Guided build</span>
-          <strong id="workflow-node">Preparing…</strong>
-        </div>
-        <ol id="workflow-steps" class="workflow-steps"></ol>
-        <p id="workflow-guidance" class="workflow-guidance"></p>
-        <div id="workflow-action"></div>
-      </aside>
-      <div id="status" class="status">Loading assets…</div>
+
+      <div id="stage-empty" class="stage-empty" hidden>
+        <div class="stage-empty__frame"></div>
+        <p>The scene appears here once evidence is approved and assets are built.</p>
+      </div>
+
+      <div id="status" class="readout"></div>
     </main>
     <script type="module" src="/main.ts"></script>
   </body>

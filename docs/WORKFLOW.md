@@ -6,7 +6,7 @@ The normal interactive path is:
 
 1. `intake → clarify-intent → await-clarification`
 2. user answer resumes at `plan-research`
-3. three `research-perspectives` execute concurrently
+3. three `research-perspectives` plus one `reference-image-search` execute concurrently
 4. `synthesize-research → await-research-approval`
 5. approval resumes at `generate-scene`
 6. scene planning, asset resolution/generation, assembly, rendering, and bounded visual QA execute
@@ -22,6 +22,7 @@ Every produced render is inspected, including the last render after a correction
 - Reference images: 5 by default.
 - Clarification questions: 1–4 in one turn for the MVP.
 - Research perspectives: exactly 3 concurrent branches.
+- Reference discovery: exactly 1 image-search branch, concurrent with the 3 evidence branches.
 - Research follow-ups: configurable from 1–3 total rounds; 2 by default.
 - Planned scene objects: 8 by default.
 - Asset recipe parts: 16 per asset.
@@ -35,7 +36,8 @@ Every produced render is inspected, including the last render after a correction
 clarify  = sha256(normalized prompt + explicit preference profile + clarifier identity)
 intent   = sha256(prompt + clarification + answers + preference profile)
 branch   = sha256(intent + perspective agenda + research model)
-dossier  = sha256(intent + three branch results + synthesis model)
+refs     = sha256(intent + research agenda + reference-search model)
+dossier  = sha256(intent + three branch results + image-search attribution + synthesis model)
 plan     = sha256(prompt + approved dossier hash + intent + planning model)
 asset    = sha256(normalized asset recipe + Blender driver version + asset schema)
 render   = sha256(canonical scene + renderer and capture identities)
@@ -74,7 +76,7 @@ Before Gemini inspection, the backend transforms the exact GLB-derived local AAB
 
 ## Research collection
 
-Gemini Google Search grounding provides textual sources, claim-support indices, and image-search chunks. The backend maps findings to the exact returned grounding chunks, refuses unbound findings, synthesizes object studies without allowing new URLs, then applies a deterministic readiness gate. The three perspectives answer separate self-question sets for visual identity, construction/materials, and scale/space. Only an approved dossier reaches scene planning.
+Gemini 3.7 Flash runs the three schema-validated Google Web Search branches for visual identity, construction/materials, and scale/space. In the same fan-out, Gemini 3.1 Flash Image runs Google Image Search and contributes only returned grounding metadata; it is not asked for structured JSON or image generation. The backend maps findings to exact grounding chunks, refuses unbound findings, preserves Google's rendered search attribution, synthesizes object studies without allowing new URLs, then applies a deterministic readiness gate. Only an approved dossier reaches scene planning.
 
 The backend downloads no more than the configured reference count, records individual failures rather than failing the scene-generation stage, and writes:
 
@@ -83,6 +85,7 @@ research/brief.json
 research/intent.json
 research/agenda.json
 research/dossier.json
+research/reference-discovery.json
 research/readiness.json
 research/perspectives/*.json
 research/notes.md

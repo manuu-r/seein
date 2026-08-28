@@ -7,8 +7,14 @@ import { createAppServices } from "../src/app.js";
 import { DeterministicBlenderDriver, type BlenderRequest } from "../src/blender/blender-driver.js";
 import { loadConfig } from "../src/config.js";
 import { ReferenceCollector } from "../src/research/reference-collector.js";
-import type { ResearchPerspective, ResearchPerspectiveResult } from "../src/workflow/graph-contracts.js";
-import { evaluateResearchReadiness } from "../src/workflow/graph-state.js";
+import {
+  AgentNoteSchema,
+  NOTE_SOURCE_MAX_LENGTH,
+  NOTE_TEXT_MAX_LENGTH,
+  type ResearchPerspective,
+  type ResearchPerspectiveResult,
+} from "../src/workflow/graph-contracts.js";
+import { createNote, evaluateResearchReadiness, resumeStageFor } from "../src/workflow/graph-state.js";
 import { validatePlanAgainstDossier } from "../src/workflow/orchestrator.js";
 
 const temporaryDirectories: string[] = [];
@@ -26,6 +32,7 @@ describe("interactive agent graph", () => {
       DATA_ROOT: root,
       PUBLIC_BASE_URL: "http://localhost:8787",
       AI_DRIVER: "deterministic",
+      REFERENCE_SEARCH_DRIVER: "none",
       CONTEXT_DRIVER: "memory",
       BLENDER_DRIVER: "deterministic",
       SCREENSHOT_DRIVER: "placeholder",
@@ -34,6 +41,7 @@ describe("interactive agent graph", () => {
       active = 0;
       maxActive = 0;
       calls = 0;
+      referenceCalls = 0;
 
       override async researchPerspective(
         intent: Parameters<DeterministicWorkflowAI["researchPerspective"]>[0],
@@ -45,6 +53,21 @@ describe("interactive agent graph", () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
         try {
           return await super.researchPerspective(intent, perspective);
+        } finally {
+          this.active -= 1;
+        }
+      }
+
+      override async researchReferences(
+        intent: Parameters<DeterministicWorkflowAI["researchReferences"]>[0],
+        agenda: Parameters<DeterministicWorkflowAI["researchReferences"]>[1],
+      ) {
+        this.referenceCalls += 1;
+        this.active += 1;
+        this.maxActive = Math.max(this.maxActive, this.active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        try {
+          return await super.researchReferences(intent, agenda);
         } finally {
           this.active -= 1;
         }
@@ -81,13 +104,15 @@ describe("interactive agent graph", () => {
       await services.orchestrator.getActiveRun(project.projectId);
       const researched = await services.orchestrator.getGraphState(project.projectId);
       expect(ai.calls).toBe(3);
-      expect(ai.maxActive).toBe(3);
+      expect(ai.referenceCalls).toBe(1);
+      expect(ai.maxActive).toBe(4);
       expect(researched?.currentNode).toBe("await-research-approval");
       expect(researched?.researchDossier?.readiness.decision).toBe("ready");
       expect(researched?.researchDossier?.objectStudies).toHaveLength(3);
       expect(researched?.researchDossier?.intentCoverage).toHaveLength(3);
       expect(blender.batches).toHaveLength(0);
       expect(await fs.stat(path.join(project.root, "research", "dossier.json"))).toBeTruthy();
+      expect(await fs.stat(path.join(project.root, "research", "reference-discovery.json"))).toBeTruthy();
 
       await services.orchestrator.decideResearch(project.projectId, { decision: "approve", feedback: "" });
       await services.orchestrator.getActiveRun(project.projectId);
@@ -120,6 +145,7 @@ describe("interactive agent graph", () => {
       DATA_ROOT: root,
       PUBLIC_BASE_URL: "http://localhost:8787",
       AI_DRIVER: "deterministic",
+      REFERENCE_SEARCH_DRIVER: "none",
       CONTEXT_DRIVER: "memory",
       BLENDER_DRIVER: "deterministic",
       SCREENSHOT_DRIVER: "placeholder",
@@ -165,5 +191,116 @@ describe("interactive agent graph", () => {
     const rogue = structuredClone(plan);
     rogue.assets.push({ ...structuredClone(rogue.assets[0]!), id: "unresearched-decoration" });
     expect(() => validatePlanAgainstDossier(rogue, ready)).toThrow("without approved object studies");
+  });
+
+  it("clamps oversized note text and source so long citations cannot fail state validation", () => {
+    const longUrl = `https://example.com/reference?q=${"a".repeat(NOTE_SOURCE_MAX_LENGTH)}`;
+    const longText = "identity marker. ".repeat(NOTE_TEXT_MAX_LENGTH);
+
+    const note = createNote("research-finding", longText, longUrl);
+
+    expect(note.source.length).toBe(NOTE_SOURCE_MAX_LENGTH);
+    expect(note.text.length).toBe(NOTE_TEXT_MAX_LENGTH);
+    expect(() => AgentNoteSchema.parse(note)).not.toThrow();
+  });
+
+  it("rewinds a failed run to its last successful checkpoint and restarts from there", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "seein-agent-resume-"));
+    temporaryDirectories.push(root);
+    const config = loadConfig({
+      NODE_ENV: "test",
+      DATA_ROOT: root,
+      PUBLIC_BASE_URL: "http://localhost:8787",
+      AI_DRIVER: "deterministic",
+      REFERENCE_SEARCH_DRIVER: "none",
+      CONTEXT_DRIVER: "memory",
+      BLENDER_DRIVER: "deterministic",
+      SCREENSHOT_DRIVER: "placeholder",
+    });
+
+    class FlakySynthesisAI extends DeterministicWorkflowAI {
+      failSynthesis = true;
+      perspectiveCalls = 0;
+
+      override async researchPerspective(
+        intent: Parameters<DeterministicWorkflowAI["researchPerspective"]>[0],
+        perspective: ResearchPerspective,
+      ): Promise<ResearchPerspectiveResult> {
+        this.perspectiveCalls += 1;
+        return super.researchPerspective(intent, perspective);
+      }
+
+      override async synthesizeResearch(
+        ...params: Parameters<DeterministicWorkflowAI["synthesizeResearch"]>
+      ): ReturnType<DeterministicWorkflowAI["synthesizeResearch"]> {
+        if (this.failSynthesis) throw new Error("synthesis exploded");
+        return super.synthesizeResearch(...params);
+      }
+    }
+
+    const ai = new FlakySynthesisAI();
+    const services = await createAppServices(config, { ai });
+    try {
+      const project = await services.orchestrator.start("A cutaway educational steam engine", "test-user");
+      await services.orchestrator.getActiveRun(project.projectId);
+      await services.orchestrator.answerClarifications(project.projectId, {
+        answers: [
+          { questionId: "audience-purpose", answer: "Engineering students; explain energy transfer." },
+          { questionId: "accuracy-style", answer: "Reference-faithful overall proportions." },
+        ],
+        additionalContext: "",
+      });
+      await services.orchestrator.getActiveRun(project.projectId);
+
+      const failed = await services.orchestrator.getGraphState(project.projectId);
+      expect(failed?.currentNode).toBe("failed");
+      expect(failed?.failedNode).toBe("synthesize-research");
+      expect(failed?.failureMessage).toContain("synthesis exploded");
+      const perspectiveCallsBeforeResume = ai.perspectiveCalls;
+      expect(perspectiveCallsBeforeResume).toBeGreaterThan(0);
+
+      // The bug is fixed; the run should pick up from the last good node.
+      ai.failSynthesis = false;
+      const resumed = await services.orchestrator.resume(project.projectId);
+      expect(resumed.resumeCount).toBe(1);
+      expect(resumed.status).toBe("running");
+      expect(resumed.failedNode).toBeUndefined();
+      expect(resumeStageFor(resumed.currentNode)).toBe("research");
+
+      await services.orchestrator.getActiveRun(project.projectId);
+      const recovered = await services.orchestrator.getGraphState(project.projectId);
+      expect(recovered?.failureMessage ?? "").toBe("");
+      expect(recovered?.currentNode).toBe("await-research-approval");
+      expect(recovered?.researchDossier?.objectStudies).toHaveLength(3);
+      // Cached perspectives were replayed rather than regenerated.
+      expect(ai.perspectiveCalls).toBe(perspectiveCallsBeforeResume);
+
+      // Any stage-owned checkpoint is selectable, including mid-stage ones.
+      const checkpoints = await services.orchestrator.listCheckpoints(project.projectId);
+      expect(checkpoints[0]!.sequence).toBeGreaterThan(checkpoints.at(-1)!.sequence);
+      const midStage = checkpoints.find((entry) => entry.node === "synthesize-research");
+      expect(midStage?.resumable).toBe(true);
+      expect(midStage?.stage).toBe("research");
+      const waiting = checkpoints.find((entry) => entry.node === "await-research-approval");
+      expect(waiting?.resumable).toBe(false);
+
+      const targeted = await services.orchestrator.resume(project.projectId, { sequence: midStage!.sequence });
+      // A mid-stage pick re-enters at the stage's legal entry node.
+      expect(targeted.currentNode).toBe("plan-research");
+      expect(targeted.resumeCount).toBe(2);
+      await services.orchestrator.getActiveRun(project.projectId);
+      const replayed = await services.orchestrator.getGraphState(project.projectId);
+      expect(replayed?.currentNode).toBe("await-research-approval");
+      expect(ai.perspectiveCalls).toBe(perspectiveCallsBeforeResume);
+
+      await expect(
+        services.orchestrator.resume(project.projectId, { sequence: 9999 }),
+      ).rejects.toThrow("No checkpoint at sequence 9999");
+      await expect(
+        services.orchestrator.resume(project.projectId, { sequence: waiting!.sequence }),
+      ).rejects.toThrow("cannot be restarted automatically");
+    } finally {
+      await services.orchestrator.close();
+    }
   });
 });

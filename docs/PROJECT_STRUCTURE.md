@@ -71,7 +71,9 @@ data/projects/<slug>-<id>/
 │   ├── intent.json
 │   ├── agenda.json
 │   ├── dossier.json
+│   ├── reference-discovery.json            # image chunks, queries, and Google attribution
 │   ├── readiness.json
+│   ├── perspectives/
 │   │   ├── visual-identity.json
 │   │   ├── objects-materials.json
 │   │   └── scale-space.json

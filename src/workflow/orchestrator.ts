@@ -13,15 +13,17 @@ import type {
   ScenePlan,
   SpatialReport,
   WorkflowStage,
+  ReferenceArtifact,
 } from "../contracts.js";
-import { InspectionSchema, ScenePlanSchema } from "../contracts.js";
-import type { WorkflowAI } from "../ai/workflow-ai.js";
+import { InspectionSchema, ReferenceCandidateSchema, ScenePlanSchema } from "../contracts.js";
+import type { PlannerReferenceImage, WorkflowAI } from "../ai/workflow-ai.js";
 import type { BlenderDriver } from "../blender/blender-driver.js";
 import type { AssetRecord, ContextStore } from "../context/context-store.js";
 import { hashObject, sha256 } from "../lib/hash.js";
 import { normalizePrompt } from "../lib/strings.js";
 import type { ScreenshotDriver } from "../render/screenshot-driver.js";
 import type { ReferenceCollector } from "../research/reference-collector.js";
+import { objectImageQuery, type ReferenceSearchDriver } from "../research/reference-search.js";
 import {
   applyAssetRegeneration,
   applyQaPatch,
@@ -33,15 +35,20 @@ import { analyzeSpatial } from "../scene/spatial-analyzer.js";
 import type { ArtifactStore, StoredArtifact } from "../storage/artifact-store.js";
 import type { ProjectManager } from "../storage/project-manager.js";
 import {
+  CheckpointSummarySchema,
   ClarificationAnswerRequestSchema,
   ClarificationTurnSchema,
   IntentAndAgendaSchema,
+  NOTE_SOURCE_MAX_LENGTH,
+  ReferenceDiscoverySchema,
   ResearchDossierDraftSchema,
+  MAX_RESEARCH_ROUNDS_RECORDED,
   ResearchPerspectiveResultSchema,
   ResearchDecisionRequestSchema,
   UserFeedbackRequestSchema,
   UserPreferenceProfileSchema,
   WorkflowGraphStateSchema,
+  type CheckpointSummary,
   type ClarificationAnswer,
   type IntentAndAgenda,
   type IntentFrame,
@@ -53,6 +60,8 @@ import {
   createInitialGraphState,
   createNote,
   evaluateResearchReadiness,
+  resumeStageFor,
+  rewindGraphState,
   transitionGraphState,
 } from "./graph-state.js";
 
@@ -80,10 +89,64 @@ const CachedRenderSchema = z.object({
 
 const RENDERER_CACHE_IDENTITY = "three-viewer:v1";
 
+type ReferenceCandidate = z.infer<typeof ReferenceCandidateSchema>;
+
+/**
+ * Binds downloaded reference images back to the object study whose search produced
+ * them, so the planner is told which object each image depicts rather than being
+ * handed an unlabelled pile. Studies are interleaved so a per-object cap still
+ * yields coverage across objects when the overall budget is tight.
+ */
+async function loadPlannerReferenceImages(
+  artifacts: ReferenceArtifact[],
+  dossier: ResearchDossier | undefined,
+  perObject: number,
+): Promise<PlannerReferenceImage[]> {
+  if (!dossier || perObject <= 0) return [];
+  const byUrl = new Map(
+    artifacts.flatMap((artifact) =>
+      artifact.localPath && artifact.mediaType
+        ? [[artifact.candidate.imageUrl, { path: artifact.localPath, mediaType: artifact.mediaType }] as const]
+        : [],
+    ),
+  );
+  const perStudy = dossier.objectStudies.map((study) =>
+    study.referenceImageUrls.flatMap((url) => {
+      const found = byUrl.get(url);
+      return found ? [{ study, ...found }] : [];
+    }).slice(0, perObject),
+  );
+  const ordered: Array<{ study: ResearchDossier["objectStudies"][number]; path: string; mediaType: string }> = [];
+  for (let rank = 0; rank < perObject; rank += 1) {
+    for (const entries of perStudy) {
+      const entry = entries[rank];
+      if (entry) ordered.push(entry);
+    }
+  }
+  return Promise.all(
+    ordered.map(async (entry) => ({
+      studyId: entry.study.id,
+      studyName: entry.study.name,
+      mediaType: entry.mediaType,
+      data: await fs.readFile(entry.path),
+    })),
+  );
+}
+
+function uniqueReferences(candidates: ReferenceCandidate[]): ReferenceCandidate[] {
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate.imageUrl)) return false;
+    seen.add(candidate.imageUrl);
+    return true;
+  });
+}
+
 export class Orchestrator {
   private readonly activeRuns = new Map<string, Promise<unknown>>();
   private readonly interactionLocks = new Set<string>();
   private readonly sequences = new Map<string, number>();
+  private readonly bypassCache = new Set<string>();
 
   constructor(
     private readonly config: Config,
@@ -92,6 +155,7 @@ export class Orchestrator {
     private readonly context: ContextStore,
     private readonly ai: WorkflowAI,
     private readonly references: ReferenceCollector,
+    private readonly referenceSearch: ReferenceSearchDriver,
     private readonly blender: BlenderDriver,
     private readonly screenshots: ScreenshotDriver,
   ) {}
@@ -113,6 +177,117 @@ export class Orchestrator {
   async run(prompt: string): Promise<WorkflowResult> {
     const project = await this.projects.create(prompt);
     return this.execute(project);
+  }
+
+  /** Every persisted checkpoint, newest first, flagged with whether it can be rewound to. */
+  async listCheckpoints(projectId: string): Promise<CheckpointSummary[]> {
+    const project = await this.projects.load(projectId);
+    if (!project) throw new Error(`Project not found: ${projectId}`);
+    const states = await this.readCheckpoints(project);
+    return states
+      .map((state) => {
+        const stage = resumeStageFor(state.currentNode);
+        return CheckpointSummarySchema.parse({
+          sequence: state.sequence,
+          node: state.currentNode,
+          status: state.status,
+          guidance: state.guidance,
+          stage,
+          resumable: stage !== null && state.status !== "failed",
+          updatedAt: state.updatedAt,
+        });
+      })
+      .sort((a, b) => b.sequence - a.sequence);
+  }
+
+  /**
+   * Rewind to a checkpoint and restart the stage that owns it. Without a target
+   * sequence this picks the newest resumable checkpoint. Work already cached is
+   * replayed rather than regenerated, so a fixed bug can be retried cheaply.
+   */
+  async resume(
+    projectId: string,
+    options: { sequence?: number | undefined; fresh?: boolean | undefined } = {},
+  ): Promise<WorkflowGraphState> {
+    return this.withInteractionLock(projectId, async () => {
+      const project = await this.projects.load(projectId);
+      if (!project) throw new Error(`Project not found: ${projectId}`);
+      const state = await this.getGraphState(projectId);
+      if (!state) throw new Error(`Project has no graph state to resume: ${projectId}`);
+      if (state.status === "running") {
+        throw new Error(`Project is still running at ${state.currentNode}; wait for it to settle before resuming.`);
+      }
+
+      const checkpoints = await this.readCheckpoints(project);
+      const target = options.sequence === undefined
+        ? [...checkpoints]
+            .sort((a, b) => b.sequence - a.sequence)
+            .find((candidate) => resumeStageFor(candidate.currentNode) !== null && candidate.status !== "failed")
+        : checkpoints.find((candidate) => candidate.sequence === options.sequence);
+      if (!target) {
+        throw new Error(
+          options.sequence === undefined
+            ? "No successful checkpoint to rewind to; start a new run instead."
+            : `No checkpoint at sequence ${options.sequence}.`,
+        );
+      }
+      const stage = resumeStageFor(target.currentNode);
+      if (!stage) throw new Error(`The ${target.currentNode} checkpoint cannot be restarted automatically.`);
+
+      const resumed = rewindGraphState(state, target);
+      const cleared = await this.projects.update(project, {
+        status: stage === "generation" ? "planning" : "researching",
+        error: undefined,
+      });
+      await Promise.all([
+        this.persistGraphState(cleared, resumed),
+        this.emit(cleared, "resumed", "started", {
+          failedNode: state.failedNode ?? null,
+          rewoundTo: target.currentNode,
+          rewoundToSequence: target.sequence,
+          entryNode: resumed.currentNode,
+          stage,
+          fresh: options.fresh === true,
+          resumeCount: resumed.resumeCount,
+        }),
+      ]);
+
+      if (options.fresh) this.bypassCache.add(projectId);
+      const work = stage === "generation"
+        ? this.runApprovedGeneration(cleared, resumed)
+        : stage === "research"
+          ? this.runResearchGraph(cleared, resumed, "", true)
+          : this.beginClarification(cleared, resumed);
+      this.track(
+        projectId,
+        work.finally(() => {
+          this.bypassCache.delete(projectId);
+        }),
+      );
+      return resumed;
+    });
+  }
+
+  /** Parses every checkpoint file, skipping any that no longer satisfy the schema. */
+  private async readCheckpoints(project: ProjectRecord): Promise<WorkflowGraphState[]> {
+    const directory = path.join(project.root, "graph", "checkpoints");
+    let files: string[];
+    try {
+      files = await fs.readdir(directory);
+    } catch {
+      return [];
+    }
+    const states: WorkflowGraphState[] = [];
+    for (const file of files.filter((entry) => entry.endsWith(".json")).sort()) {
+      try {
+        states.push(
+          WorkflowGraphStateSchema.parse(JSON.parse(await fs.readFile(path.join(directory, file), "utf8"))),
+        );
+      } catch {
+        continue;
+      }
+    }
+    return states;
   }
 
   getActiveRun(projectId: string): Promise<unknown> | undefined {
@@ -218,15 +393,21 @@ export class Orchestrator {
       this.track(projectId, this.runApprovedGeneration(project, next));
       return next;
     }
-    if (state.researchRound >= this.config.WORKFLOW_MAX_RESEARCH_ROUNDS) {
+    // While the audit still reports gaps the user keeps the option of another targeted
+    // round; the configured bound only caps rounds once the evidence is already clean.
+    const remainingGaps = state.researchDossier.readiness.gaps;
+    if (remainingGaps.length === 0 && state.researchRound >= this.config.WORKFLOW_MAX_RESEARCH_ROUNDS) {
       throw new Error(`Research has reached the configured ${this.config.WORKFLOW_MAX_RESEARCH_ROUNDS}-round bound`);
     }
-    if (!request.feedback) throw new Error("Research-more requires feedback describing the missing evidence");
+    // "Research this gap" should be able to act on the gaps the audit already found,
+    // so fall back to them when the user does not describe a specific follow-up.
+    const focus = request.feedback || remainingGaps.join(" ");
+    if (!focus) throw new Error("Research-more requires feedback describing the missing evidence");
     const agenda = structuredClone(state.researchAgenda);
     if (!agenda) throw new Error("Research agenda is missing");
     for (const perspective of agenda.perspectives) {
-      perspective.objective = `${perspective.objective} Follow-up requested by user: ${request.feedback}`;
-      perspective.searchHints = [...perspective.searchHints, request.feedback].slice(0, 8);
+      perspective.objective = `${perspective.objective} Follow-up requested by user: ${focus}`;
+      perspective.searchHints = [...perspective.searchHints, focus].slice(0, 8);
     }
     const next = transitionGraphState(
       state,
@@ -235,8 +416,8 @@ export class Orchestrator {
       "I have added your gap to the research agenda and will run one targeted follow-up round.",
       {
         researchAgenda: agenda,
-        researchRound: state.researchRound + 1,
-        notes: [...state.notes, createNote("feedback", request.feedback, "research-more")],
+        researchRound: Math.min(state.researchRound + 1, MAX_RESEARCH_ROUNDS_RECORDED),
+        notes: [...state.notes, createNote("feedback", focus, "research-more")],
       },
     );
     await Promise.all([
@@ -333,6 +514,65 @@ export class Orchestrator {
     }
   }
 
+  private async attachObjectReferences(
+    project: ProjectRecord,
+    intent: IntentFrame,
+    draft: Omit<ResearchDossier, "perspectives" | "readiness" | "generatedAt">,
+  ): Promise<Omit<ResearchDossier, "perspectives" | "readiness" | "generatedAt">> {
+    // With search switched off the pipeline does not manage reference images at all,
+    // so whatever the dossier already carries is left untouched.
+    if (this.config.REFERENCE_SEARCH_DRIVER === "none") return draft;
+    const perObject = this.config.REFERENCE_IMAGES_PER_OBJECT;
+    // Publisher hosts block scrapers and time out often enough that asking for exactly
+    // the number needed leaves studies short, so over-fetch and keep the survivors.
+    const requested = perObject * 2;
+    const directory = path.join(project.root, "research", "references");
+    const searched = await Promise.all(
+      draft.objectStudies.map(async (study) => {
+        const query = objectImageQuery(intent.subject, study.name, study.identityMarkers);
+        const key = hashObject({ query, requested, provider: this.referenceSearch.identity, schema: "object-references-v2" });
+        const cached = z.array(ReferenceCandidateSchema).safeParse(await this.findCachedStepFor(project.projectId, key));
+        const candidates = cached.success
+          ? cached.data
+          : await this.referenceSearch.searchImages(query, requested).catch(() => [] as ReferenceCandidate[]);
+        if (!cached.success && candidates.length > 0) {
+          await this.context.storeCachedStep(key, "object-references", candidates);
+        }
+        // A URL only counts once the bytes are on disk; otherwise the readiness gate
+        // would promise the planner images it will never receive.
+        const artifacts = await this.references.collectCandidates(candidates, directory);
+        const downloaded = artifacts.flatMap((artifact) => (artifact.localPath ? [artifact.candidate] : []));
+        return {
+          study,
+          searched: candidates.length,
+          downloaded: downloaded.slice(0, perObject),
+          failed: artifacts.length - downloaded.length,
+        };
+      }),
+    );
+    const pool = uniqueReferences([
+      ...draft.brief.references,
+      ...searched.flatMap((entry) => entry.downloaded),
+    ]);
+    await this.emit(project, "auditing_research", "info", {
+      referenceDriver: this.referenceSearch.identity,
+      studiesWithImages: searched.filter((entry) => entry.downloaded.length > 0).length,
+      studies: searched.length,
+      imagesSearched: searched.reduce((total, entry) => total + entry.searched, 0),
+      imagesDownloaded: pool.length,
+      downloadFailures: searched.reduce((total, entry) => total + entry.failed, 0),
+    });
+    return {
+      ...draft,
+      brief: { ...draft.brief, references: pool.slice(0, 64) },
+      objectStudies: searched.map(({ study, downloaded }) => ({
+        ...study,
+        // Left empty on total failure so reference-coverage reports a real gap.
+        referenceImageUrls: downloaded.map((candidate) => candidate.imageUrl).slice(0, 6),
+      })),
+    };
+  }
+
   private async beginClarification(project: ProjectRecord, initialState: WorkflowGraphState): Promise<void> {
     let state = initialState;
     try {
@@ -353,7 +593,7 @@ export class Orchestrator {
         provider: this.ai.clarificationIdentity,
         schema: "clarification-v1",
       });
-      const cached = await this.context.findCachedStep(cacheKey);
+      const cached = await this.findCachedStepFor(project.projectId, cacheKey);
       const parsed = ClarificationTurnSchema.safeParse(cached);
       const clarification = parsed.success
         ? parsed.data
@@ -406,7 +646,7 @@ export class Orchestrator {
           provider: this.ai.clarificationIdentity,
           schema: "intent-agenda-v1",
         });
-        const cachedPreparation = IntentAndAgendaSchema.safeParse(await this.context.findCachedStep(preparationKey));
+        const cachedPreparation = IntentAndAgendaSchema.safeParse(await this.findCachedStepFor(currentProject.projectId, preparationKey));
         prepared = cachedPreparation.success
           ? cachedPreparation.data
           : await this.ai.prepareIntent(
@@ -427,7 +667,7 @@ export class Orchestrator {
         WorkflowGraphStateSchema.parse({ ...state, notes: [...state.notes, ...preparationNotes] }),
         "research-perspectives",
         "running",
-        "Three independent research branches are running in parallel: visual identity, objects/materials, and scale/space.",
+        "Three evidence branches and one targeted reference-image search are running in parallel.",
       );
       currentProject = await this.projects.update(currentProject, { status: "researching" });
       await Promise.all([
@@ -436,25 +676,51 @@ export class Orchestrator {
           perspectives: prepared.agenda.perspectives.map((perspective) => perspective.id),
           round: state.researchRound,
         }),
-        this.emit(currentProject, "researching", "started", { parallelBranches: 3, round: state.researchRound }),
+        this.emit(currentProject, "researching", "started", {
+          parallelBranches: 4,
+          evidenceBranches: 3,
+          referenceSearches: 1,
+          round: state.researchRound,
+        }),
       ]);
       const branchHits: boolean[] = [];
-      const perspectives = await Promise.all(
-        prepared.agenda.perspectives.map(async (perspective, index) => {
+      const referenceKey = hashObject({
+        intent: prepared.intent,
+        agenda: prepared.agenda,
+        provider: this.ai.referenceResearchIdentity,
+        schema: "reference-discovery-v1",
+      });
+      const cachedReferences = ReferenceDiscoverySchema.safeParse(await this.findCachedStepFor(currentProject.projectId, referenceKey));
+      const referencePromise = cachedReferences.success
+        ? Promise.resolve(cachedReferences.data)
+        : this.ai.researchReferences(prepared.intent, prepared.agenda).then(async (discovery) => {
+            const parsed = ReferenceDiscoverySchema.parse(discovery);
+            await this.context.storeCachedStep(referenceKey, "reference-discovery", parsed);
+            return parsed;
+          });
+      const [rawPerspectives, referenceDiscovery] = await Promise.all([
+        Promise.all(prepared.agenda.perspectives.map(async (perspective, index) => {
           const key = hashObject({
             intent: prepared!.intent,
             perspective,
             provider: this.ai.deepResearchIdentity,
-            schema: "research-perspective-v1",
+            schema: "research-perspective-v2",
           });
-          const cached = ResearchPerspectiveResultSchema.safeParse(await this.context.findCachedStep(key));
+          const cached = ResearchPerspectiveResultSchema.safeParse(await this.findCachedStepFor(currentProject.projectId, key));
           branchHits[index] = cached.success;
           if (cached.success) return cached.data;
           const result = await this.ai.researchPerspective(prepared!.intent, perspective);
           await this.context.storeCachedStep(key, `research-perspective:${perspective.id}`, result);
           return result;
-        }),
-      );
+        })),
+        referencePromise,
+      ]);
+      const perspectives = rawPerspectives.map((perspective, index) => ResearchPerspectiveResultSchema.parse({
+        ...perspective,
+        references: index === 0 && referenceDiscovery.references.length > 0
+          ? referenceDiscovery.references
+          : perspective.references,
+      }));
       state = transitionGraphState(
         state,
         "synthesize-research",
@@ -464,26 +730,41 @@ export class Orchestrator {
       currentProject = await this.projects.update(currentProject, { status: "auditing_research" });
       await Promise.all([
         this.persistGraphState(currentProject, state),
-        this.emit(currentProject, "researching", "completed", { cacheHits: branchHits, round: state.researchRound }),
+        this.emit(currentProject, "researching", "completed", {
+          cacheHits: branchHits,
+          referenceCacheHit: cachedReferences.success,
+          references: referenceDiscovery.references.length,
+          round: state.researchRound,
+        }),
         this.emit(currentProject, "auditing_research", "started", {}),
       ]);
       const synthesisKey = hashObject({
         intent: prepared.intent,
         perspectives,
+        searchAttribution: referenceDiscovery.searchAttribution ?? null,
         provider: this.ai.planningIdentity,
-        schema: "research-dossier-draft-v1",
+        schema: "research-dossier-draft-v2",
       });
-      const cachedDraft = ResearchDossierDraftSchema.safeParse(await this.context.findCachedStep(synthesisKey));
+      const cachedDraft = ResearchDossierDraftSchema.safeParse(await this.findCachedStepFor(currentProject.projectId, synthesisKey));
       const draft = cachedDraft.success
         ? cachedDraft.data
         : await this.ai.synthesizeResearch(prepared.intent, perspectives);
       if (!cachedDraft.success) await this.context.storeCachedStep(synthesisKey, "research-dossier-draft", draft);
-      const dossier = evaluateResearchReadiness(prepared.intent, perspectives, draft);
+      // Reference images are attached per object study after synthesis, so each study
+      // carries images of the thing it describes rather than of the scene in general.
+      // The pipeline sets these URLs from search results; the model never invents them.
+      const studied = await this.attachObjectReferences(currentProject, prepared.intent, draft);
+      const dossier = evaluateResearchReadiness(
+        prepared.intent,
+        perspectives,
+        studied,
+        referenceDiscovery.searchAttribution,
+      );
       const researchNotes = dossier.objectStudies.map((study) =>
         createNote(
           "research-finding",
           `${study.name}: ${study.identityMarkers.join("; ")}`,
-          study.sourceUrls[0] ?? "research-dossier",
+          study.sourceUrls.find((url) => url.length <= NOTE_SOURCE_MAX_LENGTH) ?? "research-dossier",
           "project",
           study.uncertainty ? 0.75 : 0.9,
         ),
@@ -510,6 +791,7 @@ export class Orchestrator {
         this.artifacts.writeJson(`${relativeRoot}/research/intent.json`, prepared.intent),
         this.artifacts.writeJson(`${relativeRoot}/research/agenda.json`, prepared.agenda),
         this.artifacts.writeJson(`${relativeRoot}/research/dossier.json`, dossier),
+        this.artifacts.writeJson(`${relativeRoot}/research/reference-discovery.json`, referenceDiscovery),
         this.artifacts.writeJson(`${relativeRoot}/research/readiness.json`, dossier.readiness),
         ...perspectives.map((result) =>
           this.artifacts.writeJson(`${relativeRoot}/research/perspectives/${result.perspectiveId}.json`, result),
@@ -569,6 +851,11 @@ export class Orchestrator {
     }
   }
 
+  private async findCachedStepFor(projectId: string, key: string): Promise<unknown | null> {
+    if (this.bypassCache.has(projectId)) return null;
+    return this.context.findCachedStep(key);
+  }
+
   private async persistGraphState(project: ProjectRecord, state: WorkflowGraphState): Promise<void> {
     const parsed = WorkflowGraphStateSchema.parse(state);
     const relativeRoot = this.projects.relativeRoot(project);
@@ -587,7 +874,10 @@ export class Orchestrator {
     const latest = await this.getGraphState(project.projectId) ?? state;
     const failed = latest.currentNode === "failed"
       ? latest
-      : transitionGraphState(latest, "failed", "failed", `The workflow stopped: ${message}`, {});
+      : transitionGraphState(latest, "failed", "failed", `The workflow stopped: ${message}`, {
+          failedNode: latest.currentNode,
+          failureMessage: message.slice(0, 8000),
+        });
     await Promise.all([
       this.persistGraphState(project, failed),
       this.projects.update(project, { status: "failed", error: message }),
@@ -624,62 +914,81 @@ export class Orchestrator {
       } else if (options.research) {
         await this.context.storeResearch(researchKey, project.prompt, research);
       }
+      // The planner reads these images, so they must be on disk before it runs.
+      const [referenceArtifacts] = await Promise.all([
+        this.references.collect(research, path.join(project.root, "research", "references")),
+        this.artifacts.writeJson(`${relativeRoot}/research/brief.json`, research),
+        this.artifacts.writeJson(`${relativeRoot}/research/sources.json`, research.sources),
+        this.artifacts.writeText(`${relativeRoot}/research/notes.md`, renderResearchNotes(research)),
+      ]);
+      const plannerImages = await loadPlannerReferenceImages(
+        referenceArtifacts,
+        options.dossier,
+        this.config.PLANNER_REFERENCE_IMAGES_PER_OBJECT,
+      );
       const planKey = hashObject({
         prompt: normalizePrompt(project.prompt),
         research: hashObject(research),
         intent: options.intent ?? null,
         dossier: options.dossier ? hashObject(options.dossier) : null,
         maxObjects: this.config.WORKFLOW_MAX_OBJECTS,
-        schema: "plan-v5",
+        // A plan built while looking at different images is a different plan.
+        referenceImages: plannerImages.map((image) => `${image.studyId}:${sha256(image.data)}`),
+        schema: "plan-v6",
         provider: this.ai.planningIdentity,
       });
-      const cachedPlan = ScenePlanSchema.safeParse(await this.context.findCachedStep(planKey));
+      const cachedPlan = ScenePlanSchema.safeParse(await this.findCachedStepFor(project.projectId, planKey));
       const planCacheHit = cachedPlan.success;
-      const planPromise = cachedPlan.success
-        ? Promise.resolve(cachedPlan.data)
-        : Promise.resolve(
-            this.ai.plan(project.prompt, research, this.config.WORKFLOW_MAX_OBJECTS, options.intent, options.dossier),
-          ).then(
-            async (value) => {
-              const parsed = ScenePlanSchema.parse(value);
-              validatePlanAgainstDossier(parsed, options.dossier);
-              await this.context.storeCachedStep(planKey, "scene-plan", parsed);
-              return parsed;
-            },
-          );
-      const [initialPlan, referenceArtifacts] = await Promise.all([
-        planPromise,
-        this.references.collect(research, path.join(project.root, "research", "references")),
-        this.artifacts.writeJson(`${relativeRoot}/research/brief.json`, research),
-        this.artifacts.writeJson(`${relativeRoot}/research/sources.json`, research.sources),
-        this.artifacts.writeText(`${relativeRoot}/research/notes.md`, renderResearchNotes(research)),
-      ]);
+      const initialPlan = cachedPlan.success
+        ? cachedPlan.data
+        : await Promise.resolve(
+            this.ai.plan(
+              project.prompt,
+              research,
+              this.config.WORKFLOW_MAX_OBJECTS,
+              options.intent,
+              options.dossier,
+              plannerImages,
+            ),
+          ).then(async (value) => {
+            const parsed = ScenePlanSchema.parse(value);
+            validatePlanAgainstDossier(parsed, options.dossier);
+            await this.context.storeCachedStep(planKey, "scene-plan", parsed);
+            return parsed;
+          });
       let plan = initialPlan;
       validatePlanAgainstDossier(plan, options.dossier);
-      await this.artifacts.writeJson(`${relativeRoot}/research/references/index.json`, referenceArtifacts);
-      await this.emit(project, "researching", "completed", {
-        cacheHit: researchCacheHit,
-        preApprovedDossier: options.research !== undefined,
-        referencesRequested: research.references.length,
-        referencesDownloaded: referenceArtifacts.filter((artifact) => artifact.localPath).length,
-        referencesReused: referenceArtifacts.filter((artifact) => artifact.reused).length,
-      });
+      await Promise.all([
+        this.artifacts.writeJson(`${relativeRoot}/research/references/index.json`, referenceArtifacts),
+        this.emit(project, "researching", "completed", {
+          cacheHit: researchCacheHit,
+          preApprovedDossier: options.research !== undefined,
+          referencesRequested: research.references.length,
+          referencesDownloaded: referenceArtifacts.filter((artifact) => artifact.localPath).length,
+          referencesReused: referenceArtifacts.filter((artifact) => artifact.reused).length,
+          referencesShownToPlanner: plannerImages.length,
+        }),
+      ]);
 
       project = await this.stage(project, "planning");
-      await this.artifacts.writeJson(`${relativeRoot}/plan/scene-plan.json`, plan);
-      await this.emit(project, "planning", "completed", {
-        cacheHit: planCacheHit,
-        assets: plan.assets.length,
-        objects: plan.objects.length,
-      });
+      await Promise.all([
+        this.artifacts.writeJson(`${relativeRoot}/plan/scene-plan.json`, plan),
+        this.emit(project, "planning", "completed", {
+          cacheHit: planCacheHit,
+          assets: plan.assets.length,
+          objects: plan.objects.length,
+        }),
+      ]);
 
       project = await this.stage(project, "resolving_assets");
       let resolved = await this.resolveAssets(project, plan, 1);
-      await this.artifacts.writeJson(`${relativeRoot}/assets/index.json`, [...resolved.values()]);
-      await this.emit(project, "resolving_assets", "completed", {
-        generated: [...resolved.values()].filter((asset) => !asset.reused).length,
-        reused: [...resolved.values()].filter((asset) => asset.reused).length,
-      });
+      await Promise.all([
+        this.artifacts.writeJson(`${relativeRoot}/assets/index.json`, [...resolved.values()]),
+        this.emit(project, "resolving_assets", "completed", {
+          generated: [...resolved.values()].filter((asset) => !asset.reused).length,
+          reused: [...resolved.values()].filter((asset) => asset.reused).length,
+        }),
+      ]);
 
       project = await this.stage(project, "assembling");
       const initialScene = assembleScene(project.projectId, plan, resolved, 1);
@@ -732,7 +1041,7 @@ export class Orchestrator {
           renderer: this.screenshots.identity,
           schema: "inspection-v3",
         });
-        const cachedInspection = InspectionSchema.safeParse(await this.context.findCachedStep(inspectionKey));
+        const cachedInspection = InspectionSchema.safeParse(await this.findCachedStepFor(project.projectId, inspectionKey));
         const inspection: Inspection = cachedInspection.success
           ? cachedInspection.data
           : await this.ai.inspect(currentScene, currentRender.artifact.path, currentSpatial, plan);
@@ -1018,7 +1327,7 @@ export class Orchestrator {
       capture: this.screenshots.identity,
       schema: "render-v1",
     });
-    const cached = CachedRenderSchema.safeParse(await this.context.findCachedStep(cacheKey));
+    const cached = CachedRenderSchema.safeParse(await this.findCachedStepFor(project.projectId, cacheKey));
     const cacheHit =
       cached.success &&
       cached.data.browserErrors.length === 0 &&
@@ -1071,8 +1380,7 @@ export class Orchestrator {
       detail,
       createdAt: new Date().toISOString(),
     };
-    await this.projects.writeEvent(project, event);
-    await this.context.appendEvent(event);
+    await Promise.all([this.projects.writeEvent(project, event), this.context.appendEvent(event)]);
   }
 }
 

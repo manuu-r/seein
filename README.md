@@ -1,12 +1,13 @@
 # SeeIn Local Core
 
-SeeIn turns a concept prompt into a reusable interactive 3D scene through a resumable backend agent graph. It clarifies consequential intent, runs three grounded research perspectives in parallel, exposes an evidence-readiness checkpoint, reuses or generates measured assets, renders and visually refines the scene, then learns from explicit user feedback. The browser is only a renderer and typed input surface.
+SeeIn turns a concept prompt into a reusable interactive 3D scene through a resumable backend agent graph. It clarifies consequential intent, runs three grounded evidence searches plus one reference-image search in parallel, exposes an evidence-readiness checkpoint, reuses or generates measured assets, renders and visually refines the scene, then learns from explicit user feedback. The browser is only a renderer and typed input surface.
 
 > Status: working local MVP. The deterministic AI provider is intended for offline development and CI; the production path uses Gemini while all other workflow services remain local.
 
 ## Design constraints
 
 - Gemini is the only required managed API.
+- Gemini 3.7 Flash is the default for research, planning, synthesis, clarification, and screenshot inspection; Gemini 3.1 Flash Image is isolated to grounded reference-image discovery because it is the current model with Google Image Search support.
 - ClickHouse, Blender, Qwen-MM-Plugins, Chromium, storage, and orchestration run locally.
 - Every request gets an isolated project folder under `data/projects`.
 - Large artifacts live on disk; ClickHouse indexes paths, hashes, lineage, and reusable metadata.
@@ -61,7 +62,7 @@ npm run demo -- "A compact medieval blacksmith workshop"
 
 - [x] Project scaffolding and schema-validated contracts
 - [x] Local artifact store and ClickHouse context schema
-- [x] Gemini grounded web/image research, planning, and multimodal inspection adapters
+- [x] Gemini 3.7 grounded web research/planning/inspection plus parallel Gemini 3.1 grounded image-reference discovery
 - [x] SSRF-aware, size-limited reference-image collection
 - [x] Qwen-MM Blender MCP recipe execution and GLB export adapter
 - [x] Exact and compatible-asset reuse with checksum and measured-geometry validation

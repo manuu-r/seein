@@ -80,6 +80,19 @@ export const ResearchAgendaSchema = z.object({
 });
 export type ResearchAgenda = z.infer<typeof ResearchAgendaSchema>;
 
+export const ReferenceSearchAttributionSchema = z.object({
+  model: z.string().min(1).max(160),
+  queries: z.array(z.string().min(1).max(500)).max(16).default([]),
+  renderedContent: z.string().min(1).max(100_000),
+});
+export type ReferenceSearchAttribution = z.infer<typeof ReferenceSearchAttributionSchema>;
+
+export const ReferenceDiscoverySchema = z.object({
+  references: z.array(ReferenceCandidateSchema).max(8),
+  searchAttribution: ReferenceSearchAttributionSchema.optional(),
+});
+export type ReferenceDiscovery = z.infer<typeof ReferenceDiscoverySchema>;
+
 export const IntentAndAgendaSchema = z.object({
   intent: IntentFrameSchema,
   agenda: ResearchAgendaSchema,
@@ -161,9 +174,13 @@ export const ResearchDossierDraftSchema = z.object({
 export const ResearchDossierSchema = ResearchDossierDraftSchema.extend({
   perspectives: z.array(ResearchPerspectiveResultSchema).length(3),
   readiness: ResearchReadinessSchema,
+  searchAttribution: ReferenceSearchAttributionSchema.optional(),
   generatedAt: z.iso.datetime(),
 });
 export type ResearchDossier = z.infer<typeof ResearchDossierSchema>;
+
+export const NOTE_TEXT_MAX_LENGTH = 2000;
+export const NOTE_SOURCE_MAX_LENGTH = 300;
 
 export const AgentNoteSchema = z.object({
   id: z.string().min(1),
@@ -177,8 +194,8 @@ export const AgentNoteSchema = z.object({
     "spatial-fact",
     "feedback",
   ]),
-  text: z.string().min(1).max(2000),
-  source: z.string().min(1).max(300),
+  text: z.string().min(1).max(NOTE_TEXT_MAX_LENGTH),
+  source: z.string().min(1).max(NOTE_SOURCE_MAX_LENGTH),
   scope: z.enum(["project", "user"]),
   confidence: z.number().min(0).max(1),
   createdAt: z.iso.datetime(),
@@ -231,6 +248,10 @@ export const GuideStepSchema = z.object({
   summary: z.string().max(1000).default(""),
 });
 
+// Follow-up research rounds are gated on remaining evidence gaps rather than a
+// fixed count, so the stored round counter only needs a sane upper record bound.
+export const MAX_RESEARCH_ROUNDS_RECORDED = 12;
+
 export const WorkflowGraphStateSchema = z.object({
   schemaVersion: z.literal("1.0"),
   graphVersion: z.literal("seein-interaction-graph:v1"),
@@ -241,9 +262,12 @@ export const WorkflowGraphStateSchema = z.object({
   currentNode: GraphNodeIdSchema,
   status: z.enum(["running", "waiting", "completed", "failed"]),
   waitingFor: z.enum(["clarification", "research-approval", "feedback"]).optional(),
+  failedNode: GraphNodeIdSchema.optional(),
+  failureMessage: z.string().max(8000).optional(),
+  resumeCount: z.number().int().min(0).default(0),
   guidance: z.string().min(1).max(1500),
   clarificationRound: z.number().int().min(0).max(3),
-  researchRound: z.number().int().min(0).max(3),
+  researchRound: z.number().int().min(0).max(MAX_RESEARCH_ROUNDS_RECORDED),
   clarification: ClarificationTurnSchema.optional(),
   answers: z.array(ClarificationAnswerSchema).max(12).default([]),
   intent: IntentFrameSchema.optional(),
@@ -260,6 +284,17 @@ export const WorkflowGraphStateSchema = z.object({
   updatedAt: z.iso.datetime(),
 });
 export type WorkflowGraphState = z.infer<typeof WorkflowGraphStateSchema>;
+
+export const CheckpointSummarySchema = z.object({
+  sequence: z.number().int().nonnegative(),
+  node: GraphNodeIdSchema,
+  status: z.enum(["running", "waiting", "completed", "failed"]),
+  guidance: z.string(),
+  resumable: z.boolean(),
+  stage: z.enum(["clarification", "research", "generation"]).nullable(),
+  updatedAt: z.iso.datetime(),
+});
+export type CheckpointSummary = z.infer<typeof CheckpointSummarySchema>;
 
 export const ResearchDecisionRequestSchema = z.object({
   decision: z.enum(["approve", "research-more"]),

@@ -11,6 +11,17 @@ BLENDER_DRIVER=qwen-mcp
 SCREENSHOT_DRIVER=playwright
 ```
 
+The default Gemini model assignment is capability-specific:
+
+```env
+GEMINI_RESEARCH_MODEL=gemini-3.7-flash
+GEMINI_REFERENCE_MODEL=gemini-3.1-flash-image
+GEMINI_PLANNER_MODEL=gemini-3.7-flash
+GEMINI_INSPECTOR_MODEL=gemini-3.7-flash
+```
+
+The reference model is separate because Google Image Search is supported by Gemini 3.1 Flash Image, while 3.7 Flash supplies the current structured text/multimodal workhorse. Model IDs remain independently overridable, and each role is included in its phase cache identity.
+
 Verification mode uses deterministic adapters:
 
 ```env

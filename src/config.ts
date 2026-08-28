@@ -14,9 +14,10 @@ const ConfigSchema = z.object({
   DATA_ROOT: z.string().default("./data"),
   AI_DRIVER: z.enum(["gemini", "deterministic"]).default("gemini"),
   GEMINI_API_KEY: z.string().optional(),
-  GEMINI_RESEARCH_MODEL: z.string().default("gemini-3.1-flash-image"),
-  GEMINI_PLANNER_MODEL: z.string().default("gemini-3.6-flash"),
-  GEMINI_INSPECTOR_MODEL: z.string().default("gemini-3.6-flash"),
+  GEMINI_RESEARCH_MODEL: z.string().default("gemini-3.7-flash"),
+  GEMINI_REFERENCE_MODEL: z.string().default("gemini-3.1-flash-image"),
+  GEMINI_PLANNER_MODEL: z.string().default("gemini-3.7-flash"),
+  GEMINI_INSPECTOR_MODEL: z.string().default("gemini-3.7-flash"),
   CONTEXT_DRIVER: z.enum(["clickhouse", "memory"]).default("clickhouse"),
   CLICKHOUSE_URL: z.url().default("http://localhost:8123"),
   CLICKHOUSE_DATABASE: z.string().default("seein"),
@@ -31,7 +32,17 @@ const ConfigSchema = z.object({
   SCREENSHOT_DRIVER: z.enum(["playwright", "placeholder"]).default("playwright"),
   PLAYWRIGHT_HEADLESS: BooleanString,
   PLAYWRIGHT_EXECUTABLE_PATH: z.string().default(""),
-  REFERENCE_MAX_COUNT: z.coerce.number().int().min(0).max(8).default(5),
+  // firecrawl | gemini | none. Gemini's image-search grounding returns no chunks
+  // upstream, so per-object reference images come from a dedicated search driver.
+  REFERENCE_SEARCH_DRIVER: z.enum(["firecrawl", "gemini", "none"]).default("firecrawl"),
+  FIRECRAWL_API_KEY: z.string().optional(),
+  FIRECRAWL_SEARCH_URL: z.url().default("https://api.firecrawl.dev/v2/search"),
+  // Reference images retrieved per object study, and how many of those are sent to
+  // the planner. The planner bound is lower because every image costs input tokens.
+  REFERENCE_IMAGES_PER_OBJECT: z.coerce.number().int().min(1).max(6).default(3),
+  PLANNER_REFERENCE_IMAGES_PER_OBJECT: z.coerce.number().int().min(0).max(4).default(2),
+  REFERENCE_IMAGE_MIN_EDGE: z.coerce.number().int().min(0).max(4096).default(400),
+  REFERENCE_MAX_COUNT: z.coerce.number().int().min(0).max(64).default(48),
   REFERENCE_MAX_BYTES: z.coerce.number().int().min(1024).default(8_000_000),
   WORKFLOW_MAX_OBJECTS: z.coerce.number().int().min(1).max(12).default(8),
   WORKFLOW_MAX_ITERATIONS: z.coerce.number().int().min(1).max(4).default(2),
@@ -46,5 +57,6 @@ export function loadConfig(overrides: NodeJS.ProcessEnv = process.env) {
     ...config,
     DATA_ROOT: path.resolve(config.DATA_ROOT),
     GEMINI_API_KEY: config.GEMINI_API_KEY ?? "",
+    FIRECRAWL_API_KEY: config.FIRECRAWL_API_KEY ?? "",
   };
 }

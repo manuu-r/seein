@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { ProjectRecord } from "../contracts.js";
 import {
+  NOTE_SOURCE_MAX_LENGTH,
+  NOTE_TEXT_MAX_LENGTH,
   ResearchDossierSchema,
   ResearchReadinessSchema,
   WorkflowGraphStateSchema,
@@ -9,6 +11,7 @@ import {
   type IntentFrame,
   type ResearchDossier,
   type ResearchPerspectiveResult,
+  type ReferenceSearchAttribution,
   type UserPreferenceProfile,
   type WorkflowGraphState,
 } from "./graph-contracts.js";
@@ -27,6 +30,69 @@ const ALLOWED_EDGES: Record<GraphNodeId, GraphNodeId[]> = {
   completed: [],
   failed: [],
 };
+
+export type ResumeStage = "clarification" | "research" | "generation";
+
+// Which stage owns each node. Waiting and terminal nodes own no stage: they need
+// a user decision, so there is nothing to restart.
+const NODE_STAGE: Record<GraphNodeId, ResumeStage | null> = {
+  intake: "clarification",
+  "clarify-intent": "clarification",
+  "await-clarification": null,
+  "plan-research": "research",
+  "research-perspectives": "research",
+  "synthesize-research": "research",
+  "await-research-approval": null,
+  "generate-scene": "generation",
+  "visual-qa": "generation",
+  "await-feedback": null,
+  completed: null,
+  failed: null,
+};
+
+// Where each stage's runner can legally be re-entered. A runner's first act is to
+// traverse this node's outgoing edge, so entering anywhere else in the stage would
+// make it attempt a backwards transition the graph forbids.
+const STAGE_ENTRY: Record<ResumeStage, GraphNodeId> = {
+  clarification: "intake",
+  research: "plan-research",
+  generation: "generate-scene",
+};
+
+export function resumeStageFor(node: GraphNodeId): ResumeStage | null {
+  return NODE_STAGE[node];
+}
+
+export function stageEntryNode(stage: ResumeStage): GraphNodeId {
+  return STAGE_ENTRY[stage];
+}
+
+// A rewind is not a graph edge: it restores a checkpoint that was already valid.
+// Sequence keeps moving forward so the checkpoint history stays append-only.
+export function rewindGraphState(
+  current: WorkflowGraphState,
+  checkpoint: WorkflowGraphState,
+): WorkflowGraphState {
+  const stage = resumeStageFor(checkpoint.currentNode);
+  if (!stage) throw new Error(`The ${checkpoint.currentNode} checkpoint cannot be restarted automatically.`);
+  const entry = stageEntryNode(stage);
+  const now = new Date().toISOString();
+  return WorkflowGraphStateSchema.parse({
+    ...checkpoint,
+    currentNode: entry,
+    sequence: current.sequence + 1,
+    status: "running",
+    waitingFor: undefined,
+    failedNode: undefined,
+    failureMessage: undefined,
+    resumeCount: current.resumeCount + 1,
+    guidance: checkpoint.currentNode === entry
+      ? `Rewound to the ${entry} checkpoint and restarting from there.`
+      : `Rewound to the ${checkpoint.currentNode} checkpoint; the ${stage} stage restarts from ${entry} using the state captured there.`,
+    steps: guideSteps(entry, "running"),
+    updatedAt: now,
+  });
+}
 
 const GUIDE_STEPS: Array<{ id: GraphNodeId; label: string }> = [
   { id: "clarify-intent", label: "Clarify what the visualization must communicate" },
@@ -105,6 +171,10 @@ export function transitionGraphState(
   });
 }
 
+function clampNoteField(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}\u2026`;
+}
+
 export function createNote(
   kind: AgentNote["kind"],
   text: string,
@@ -115,8 +185,8 @@ export function createNote(
   return {
     id: randomUUID(),
     kind,
-    text,
-    source,
+    text: clampNoteField(text, NOTE_TEXT_MAX_LENGTH),
+    source: clampNoteField(source, NOTE_SOURCE_MAX_LENGTH),
     scope,
     confidence,
     createdAt: new Date().toISOString(),
@@ -127,6 +197,7 @@ export function evaluateResearchReadiness(
   intent: IntentFrame,
   perspectives: ResearchPerspectiveResult[],
   draft: Omit<ResearchDossier, "perspectives" | "readiness" | "generatedAt">,
+  searchAttribution?: ReferenceSearchAttribution,
 ): ResearchDossier {
   const unresolvedQuestions = [...new Set([
     ...draft.unresolvedQuestions,
@@ -143,7 +214,12 @@ export function evaluateResearchReadiness(
       }
     }),
   );
-  const references = new Set(perspectives.flatMap((result) => result.references.map((reference) => reference.imageUrl)));
+  // Per-object reference images are attached to the dossier after synthesis, so the
+  // allowed set spans the dossier pool as well as anything a perspective grounded.
+  const references = new Set([
+    ...perspectives.flatMap((result) => result.references.map((reference) => reference.imageUrl)),
+    ...draft.brief.references.map((reference) => reference.imageUrl),
+  ]);
   const perspectiveIds = new Set(perspectives.map((result) => result.perspectiveId));
   const detailedStudies = auditedDraft.objectStudies.filter(
     (study) =>
@@ -228,6 +304,7 @@ export function evaluateResearchReadiness(
     ...auditedDraft,
     perspectives,
     readiness,
+    ...(searchAttribution ? { searchAttribution } : {}),
     generatedAt: new Date().toISOString(),
   });
 }

@@ -4,6 +4,10 @@ import net from "node:net";
 import path from "node:path";
 import type { Config } from "../config.js";
 import type { ReferenceArtifact, ResearchBrief } from "../contracts.js";
+import type { ReferenceCandidateSchema } from "../contracts.js";
+import type { z } from "zod";
+
+type ReferenceCandidate = z.infer<typeof ReferenceCandidateSchema>;
 import { sha256 } from "../lib/hash.js";
 import { safeFilename } from "../lib/strings.js";
 
@@ -19,10 +23,17 @@ export class ReferenceCollector {
   constructor(private readonly config: Config) {}
 
   async collect(brief: ResearchBrief, targetDirectory: string): Promise<ReferenceArtifact[]> {
+    return this.collectCandidates(brief.references.slice(0, this.config.REFERENCE_MAX_COUNT), targetDirectory);
+  }
+
+  /** Downloads specific candidates, so callers can verify an image exists before relying on it. */
+  async collectCandidates(
+    candidates: ReferenceCandidate[],
+    targetDirectory: string,
+  ): Promise<ReferenceArtifact[]> {
     await fs.mkdir(targetDirectory, { recursive: true });
-    const selected = brief.references.slice(0, this.config.REFERENCE_MAX_COUNT);
     return Promise.all(
-      selected.map(async (candidate, index): Promise<ReferenceArtifact> => {
+      candidates.map(async (candidate, index): Promise<ReferenceArtifact> => {
         try {
           const downloaded = await this.cachedDownload(candidate.imageUrl);
           const extension = MEDIA_EXTENSIONS[downloaded.mediaType];

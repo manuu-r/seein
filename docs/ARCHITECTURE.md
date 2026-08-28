@@ -8,7 +8,7 @@ The backend owns every decision and side effect. The frontend receives a version
 prompt -> checkpointed backend graph
   -> Gemini clarification -> wait for typed answers
   -> Gemini intent + three-perspective research agenda
-  -> visual identity || objects/materials || scale/space research
+  -> visual identity || objects/materials || scale/space research || reference-image search
   -> synthesis + deterministic evidence gate -> wait for approval
   -> Gemini scene plan from approved dossier
        ├─ reference downloads || evidence artifact writes
@@ -33,7 +33,9 @@ prompt -> checkpointed backend graph
 | Chromium | Render fidelity and screenshots | Screenshots in project folders |
 | Gemini API | Research synthesis, planning, multimodal QA | Only provider outside the host |
 
-Gemini research enables both web and image search grounding. The cold path separates intent, research, and scene planning so an attractive early guess cannot become geometry before the evidence gate. Grounding chunks and claim-support indices are bound into the validated dossier so findings and reference images retain provenance. The configured research model must support image-search grounding; the default is `gemini-3.1-flash-image`.
+The Gemini adapter assigns models by capability. `gemini-3.7-flash` is the default for clarification, grounded web research, structured synthesis and planning, and multimodal screenshot inspection. A separate `gemini-3.1-flash-image` node performs Google Image Search because it is the current model that supports that search type. The four research calls run concurrently, then join before synthesis. This also avoids asking the image model for unsupported structured JSON output.
+
+The cold path separates intent, research, and scene planning so an attractive early guess cannot become geometry before the evidence gate. Grounding chunks, claim-support indices, reference-image chunks, queries, and Google's required rendered search attribution are bound into validated artifacts so findings and references retain provenance. The renderer displays the attribution markup in an isolated sandboxed frame; it does not call Gemini.
 
 ## Portability seams
 

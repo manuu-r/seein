@@ -24,11 +24,24 @@ interface Manifest {
   transitions: Array<{ from: string; to: string; durationMs: number }>;
 }
 
+interface CheckpointSummary {
+  sequence: number;
+  node: string;
+  status: "running" | "waiting" | "completed" | "failed";
+  guidance: string;
+  resumable: boolean;
+  stage: "clarification" | "research" | "generation" | null;
+  updatedAt: string;
+}
+
 interface WorkflowGraphState {
   sequence: number;
   currentNode: string;
   status: "running" | "waiting" | "completed" | "failed";
   guidance: string;
+  failedNode?: string;
+  failureMessage?: string;
+  resumeCount?: number;
   steps: Array<{ id: string; label: string; status: string; summary: string }>;
   clarification?: {
     summary: string;
@@ -39,7 +52,8 @@ interface WorkflowGraphState {
       sources: Array<{ url: string; title: string }>;
       references: Array<{ imageUrl: string; sourceUrl: string; title: string }>;
     };
-    objectStudies: Array<{ id: string; name: string; identityMarkers: string[] }>;
+    objectStudies: Array<{ id: string; name: string; identityMarkers: string[]; referenceImageUrls?: string[] }>;
+    searchAttribution?: { model: string; queries: string[]; renderedContent: string };
     readiness: {
       decision: "ready" | "needs-research" | "needs-user";
       score: number;
@@ -74,6 +88,18 @@ const workflowNode = requiredElement("#workflow-node");
 const workflowSteps = requiredElement("#workflow-steps");
 const workflowGuidance = requiredElement("#workflow-guidance");
 const workflowAction = requiredElement("#workflow-action");
+const launcher = requiredElement("#launcher");
+const stageEmpty = requiredElement("#stage-empty");
+
+// Assigned by runGuidedViewer, which can run during module evaluation.
+let restartPolling: (() => void) | null = null;
+
+const LAUNCHER_EXAMPLES = [
+  "A compact medieval blacksmith workshop with labeled tools",
+  "A cutaway of a four-stroke engine cycle",
+  "A coral reef ecosystem with labeled species",
+];
+
 
 window.__SEEIN_READY__ = false;
 window.__SEEIN_ERRORS__ = [];
@@ -81,6 +107,7 @@ window.__SEEIN_ERRORS__ = [];
 void start().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   window.__SEEIN_ERRORS__?.push(message);
+  status.hidden = false;
   status.textContent = `Scene failed: ${message}`;
   status.style.color = "#fca5a5";
   window.__SEEIN_READY__ = true;
@@ -92,10 +119,112 @@ async function start(): Promise<void> {
   const projectId = query.get("project");
   if (manifestUrl) return renderManifest(manifestUrl);
   if (projectId) return runGuidedViewer(projectId);
-  throw new Error("Missing ?manifest= or ?project= URL");
+  return showLauncher();
+}
+
+async function showLauncher(): Promise<void> {
+  const form = requiredElement("#launcher-form") as HTMLFormElement;
+  const prompt = requiredElement("#launcher-prompt") as HTMLTextAreaElement;
+  const submit = requiredElement("#launcher-submit") as HTMLButtonElement;
+  const errorLine = requiredElement("#launcher-error");
+  const examples = requiredElement("#launcher-examples");
+
+    launcher.hidden = false;
+  status.hidden = true;
+  title.textContent = "Start a new scene";
+
+  for (const example of LAUNCHER_EXAMPLES) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "launcher__chip";
+    chip.textContent = example;
+    chip.addEventListener("click", () => {
+      prompt.value = example;
+      prompt.focus();
+    });
+    examples.append(chip);
+  }
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = prompt.value.trim();
+    if (text.length < 3) return;
+    submit.disabled = true;
+    submit.textContent = "Starting…";
+    errorLine.hidden = true;
+    void createProject(text).catch((error: unknown) => {
+      errorLine.textContent = error instanceof Error ? error.message : String(error);
+      errorLine.hidden = false;
+      submit.disabled = false;
+      submit.textContent = "Generate scene";
+    });
+  });
+
+  // Cmd/Ctrl+Enter submits without reaching for the mouse.
+  prompt.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) form.requestSubmit();
+  });
+
+  await listRecentRuns();
+  prompt.focus();
+  window.__SEEIN_READY__ = true;
+}
+
+async function createProject(prompt: string): Promise<void> {
+  const response = await fetch("/api/projects", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  });
+  if (!response.ok) {
+    const detail = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(detail?.error ?? `Could not start the run: ${response.status}`);
+  }
+  const project = (await response.json()) as { projectId: string };
+  openProject(project.projectId);
+}
+
+function openProject(projectId: string): void {
+  const url = new URL(location.href);
+  url.searchParams.set("project", projectId);
+  history.replaceState(null, "", url);
+    launcher.hidden = true;
+  status.hidden = false;
+  void runGuidedViewer(projectId).catch((error: unknown) => showWorkflowError(error));
+}
+
+async function listRecentRuns(): Promise<void> {
+  const container = requiredElement("#launcher-recent");
+  const response = await fetch("/api/projects", { cache: "no-store" }).catch(() => null);
+  if (!response?.ok) return;
+  const { projects } = (await response.json()) as {
+    projects: Array<{ projectId: string; prompt: string; status: string; createdAt: string }>;
+  };
+  const recent = [...projects].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5);
+  if (recent.length === 0) return;
+
+  const heading = document.createElement("h2");
+  heading.textContent = "Prior runs";
+  container.append(heading);
+  for (const project of recent) {
+    const entry = document.createElement("button");
+    entry.type = "button";
+    entry.className = "launcher__run";
+    entry.dataset.status = project.status;
+    const label = document.createElement("span");
+    label.textContent = project.prompt;
+    const badge = document.createElement("span");
+    badge.className = "run__state";
+    badge.textContent = project.status.replaceAll("_", " ");
+    entry.append(label, badge);
+    entry.addEventListener("click", () => openProject(project.projectId));
+    container.append(entry);
+  }
+  container.hidden = false;
 }
 
 async function renderManifest(manifestUrl: string): Promise<void> {
+  stageEmpty.hidden = true;
   const response = await fetch(manifestUrl);
   if (!response.ok) throw new Error(`Manifest request failed: ${response.status}`);
   const manifest = (await response.json()) as Manifest;
@@ -190,13 +319,14 @@ async function renderManifest(manifestUrl: string): Promise<void> {
 }
 
 async function runGuidedViewer(projectId: string): Promise<void> {
-  document.body.classList.add("workflow-mode");
   workflowPanel.hidden = false;
+  stageEmpty.hidden = false;
   title.textContent = "Shaping your visualization";
   status.textContent = "Waiting for the backend graph…";
   let lastSequence = -1;
   let sceneMounted = false;
   let stopped = false;
+  let timer = 0;
 
   const refresh = async (): Promise<void> => {
     const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/interaction`, { cache: "no-store" });
@@ -208,6 +338,7 @@ async function runGuidedViewer(projectId: string): Promise<void> {
     }
     if (!sceneMounted && interaction.state.finalSceneRevision) {
       sceneMounted = true;
+      stageEmpty.hidden = true;
       await renderManifest(interaction.sceneUrl);
     } else if (!sceneMounted) {
       status.textContent = graphStatus(interaction.state);
@@ -216,15 +347,28 @@ async function runGuidedViewer(projectId: string): Promise<void> {
     stopped = interaction.state.status === "completed" || interaction.state.status === "failed";
   };
 
+  const startPolling = (): void => {
+    window.clearInterval(timer);
+    timer = window.setInterval(() => {
+      if (stopped) {
+        window.clearInterval(timer);
+        return;
+      }
+      void refresh().catch((error: unknown) => showWorkflowError(error));
+    }, 1500);
+  };
+
+  restartPolling = () => {
+    stopped = false;
+    lastSequence = -1;
+    startPolling();
+  };
+
   await refresh();
-  const timer = window.setInterval(() => {
-    if (stopped) {
-      window.clearInterval(timer);
-      return;
-    }
-    void refresh().catch((error: unknown) => showWorkflowError(error));
-  }, 1500);
+  startPolling();
 }
+
+// Set while the guided viewer is mounted so a rewind can wake the poll loop back up.
 
 function renderWorkflowAction(
   projectId: string,
@@ -234,19 +378,48 @@ function renderWorkflowAction(
   workflowNode.textContent = humanize(state.currentNode);
   workflowGuidance.textContent = state.guidance;
   workflowSteps.replaceChildren(
-    ...state.steps.map((step) => {
+    ...state.steps.map((step, index) => {
       const item = document.createElement("li");
-      item.className = "workflow-step";
+      item.className = "ledger__item";
       item.dataset.status = step.status;
-      item.textContent = step.label;
+      const marker = document.createElement("span");
+      marker.className = "ledger__index";
+      marker.textContent = String(index + 1).padStart(2, "0");
+      const label = document.createElement("span");
+      label.textContent = step.label;
+      item.append(marker, label);
       return item;
     }),
   );
   workflowAction.replaceChildren();
 
+  if (state.status === "failed") {
+    const card = document.createElement("div");
+    card.className = "card";
+    const heading = document.createElement("h2");
+    heading.textContent = state.failedNode
+      ? `Stopped at ${humanize(state.failedNode)}`
+      : "The run stopped";
+    card.append(heading);
+    if (state.failureMessage) {
+      const detail = document.createElement("pre");
+      detail.className = "failure";
+      detail.textContent = state.failureMessage.split("\n").slice(0, 6).join("\n");
+      card.append(detail);
+    }
+    const hint = document.createElement("p");
+    hint.textContent = "Pick a checkpoint below to rewind to. Cached work is replayed, not regenerated.";
+    card.append(hint);
+    workflowAction.append(card);
+  }
+
+  if (state.status !== "running") {
+    void renderCheckpointHistory(projectId, refresh);
+  }
+
   if (state.currentNode === "await-clarification" && state.clarification) {
     const form = document.createElement("form");
-    form.className = "workflow-card";
+    form.className = "card";
     const heading = document.createElement("h2");
     heading.textContent = state.clarification.summary;
     form.append(heading);
@@ -255,12 +428,12 @@ function renderWorkflowAction(
       label.htmlFor = `answer-${question.id}`;
       label.append(document.createTextNode(question.question));
       const reason = document.createElement("span");
-      reason.className = "workflow-reason";
+      reason.className = "field__why";
       reason.textContent = `Why I’m asking: ${question.reason}`;
       label.append(reason);
       if (question.options.length > 0) {
         const options = document.createElement("span");
-        options.className = "workflow-options";
+        options.className = "field__hint";
         options.textContent = `Useful starting points: ${question.options.join(" · ")}`;
         label.append(options);
       }
@@ -300,45 +473,125 @@ function renderWorkflowAction(
   if (state.currentNode === "await-research-approval" && state.researchDossier) {
     const dossier = state.researchDossier;
     const card = document.createElement("section");
-    card.className = "workflow-card";
+    card.className = "card";
+    const checks = dossier.readiness.checks;
+    const failing = checks.filter((check) => !check.passed);
     const heading = document.createElement("h2");
-    heading.textContent = `Evidence readiness ${Math.round(dossier.readiness.score * 100)}%`;
+    heading.textContent = failing.length === 0
+      ? "Evidence is ready"
+      : `${failing.length} of ${checks.length} checks still blocking`;
+    const score = document.createElement("span");
+    score.className = "readiness__score";
+    score.textContent = `${Math.round(dossier.readiness.score * 100)}%`;
+    heading.append(score);
     card.append(heading);
-    for (const check of dossier.readiness.checks) {
+
+    // Blocking checks lead; the passing ones stay auditable but out of the way.
+    for (const check of failing) {
       const row = document.createElement("div");
-      row.className = "readiness-check";
-      row.dataset.passed = String(check.passed);
-      const text = document.createElement("div");
+      row.className = "check";
+      row.dataset.passed = "false";
       const label = document.createElement("strong");
       label.textContent = check.label;
       const evidence = document.createElement("div");
-      evidence.className = "workflow-reason";
+      evidence.className = "field__why";
       evidence.textContent = check.evidence;
+      const text = document.createElement("div");
       text.append(label, evidence);
       row.append(text);
       card.append(row);
     }
-    const objectSummary = document.createElement("p");
-    objectSummary.textContent = `Object studies: ${dossier.objectStudies.map((study) => study.name).join(", ")}.`;
-    card.append(objectSummary);
-    const references = document.createElement("div");
-    references.className = "reference-links";
-    for (const reference of dossier.brief.references.slice(0, 6)) {
-      const link = document.createElement("a");
-      link.href = reference.sourceUrl;
-      link.target = "_blank";
-      link.rel = "noreferrer";
-      link.textContent = reference.title;
-      references.append(link);
+    if (failing.length < checks.length) {
+      const passed = document.createElement("details");
+      passed.className = "passed";
+      const summary = document.createElement("summary");
+      summary.textContent = `${checks.length - failing.length} checks passed`;
+      passed.append(summary);
+      for (const check of checks.filter((check) => check.passed)) {
+        const row = document.createElement("div");
+        row.className = "check";
+        row.dataset.passed = "true";
+        const text = document.createElement("div");
+        const label = document.createElement("strong");
+        label.textContent = check.label;
+        const evidence = document.createElement("div");
+        evidence.className = "field__why";
+        evidence.textContent = check.evidence;
+        text.append(label, evidence);
+        row.append(text);
+        passed.append(row);
+      }
+      card.append(passed);
     }
-    card.append(references);
+
+    // Each study with the references the planner will actually be shown, so the
+    // evidence can be judged before generation rather than after.
+    const studies = document.createElement("div");
+    studies.className = "specimens";
+    for (const study of dossier.objectStudies) {
+      const entry = document.createElement("div");
+      entry.className = "specimen";
+      const name = document.createElement("div");
+      name.className = "specimen__name";
+      name.textContent = study.name;
+      entry.append(name);
+      const images = study.referenceImageUrls ?? [];
+      if (images.length > 0) {
+        const strip = document.createElement("div");
+        strip.className = "sheet";
+        for (const url of images.slice(0, 4)) {
+          const frame = document.createElement("a");
+          frame.href = url;
+          frame.target = "_blank";
+          frame.rel = "noreferrer";
+          const thumb = document.createElement("img");
+          thumb.src = url;
+          thumb.alt = "";
+          thumb.loading = "lazy";
+          thumb.decoding = "async";
+          // Several publishers block hotlinking, so a thumbnail can fail in the
+          // browser even though the backend downloaded it for the planner. Keep the
+          // tile, drop the broken-image glyph, and say the planner still has it.
+          thumb.addEventListener("error", () => {
+            frame.dataset.unavailable = "true";
+            frame.title = "Preview blocked by the source site. The planner still received this image.";
+            thumb.remove();
+          });
+          frame.append(thumb);
+          strip.append(frame);
+        }
+        entry.append(strip);
+      } else {
+        const none = document.createElement("span");
+        none.className = "specimen__none";
+        none.textContent = "No reference image; this object is modelled from text alone.";
+        entry.append(none);
+      }
+      studies.append(entry);
+    }
+    card.append(studies);
+    if (dossier.searchAttribution) {
+      const attribution = document.createElement("details");
+      attribution.className = "attribution";
+      const summary = document.createElement("summary");
+      summary.textContent = "Google Image Search suggestions and attribution";
+      const frame = document.createElement("iframe");
+      frame.title = "Google Image Search attribution";
+      frame.setAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox");
+      frame.srcdoc = dossier.searchAttribution.renderedContent;
+      attribution.append(summary, frame);
+      card.append(attribution);
+    }
     const feedback = document.createElement("textarea");
     feedback.rows = 2;
     feedback.placeholder = "What evidence is still missing? (required only for more research)";
     const actions = document.createElement("div");
-    actions.className = "workflow-actions";
+    actions.className = "actions";
     const approve = actionButton("Approve generation");
     approve.disabled = dossier.readiness.decision !== "ready";
+    if (approve.disabled) {
+      approve.title = `Blocked by: ${failing.map((check) => check.label).join("; ")}`;
+    }
     const more = actionButton("Research this gap", "secondary");
     actions.append(approve, more);
     card.append(feedback, actions);
@@ -360,13 +613,13 @@ function renderWorkflowAction(
 
   if (state.currentNode === "await-feedback") {
     const card = document.createElement("section");
-    card.className = "workflow-card";
+    card.className = "card";
     const heading = document.createElement("h2");
     heading.textContent = state.finalInspection?.verdict === "pass" ? "The bounded visual QA passed" : "Review the final bounded result";
     const evidence = document.createElement("p");
     evidence.textContent = state.finalInspection?.evidence || "Explore the scene states and inspect the result.";
     const categories = document.createElement("div");
-    categories.className = "feedback-categories";
+    categories.className = "categories";
     for (const category of ["identity", "missing-part", "scale", "layout", "lighting", "label", "teaching-order", "style", "other"]) {
       const label = document.createElement("label");
       const input = document.createElement("input");
@@ -400,7 +653,7 @@ function renderWorkflowAction(
     preferenceValue.placeholder = "For example: always begin with a sparse overview";
     preferenceLabel.append(preferenceKey, preferenceValue);
     const actions = document.createElement("div");
-    actions.className = "workflow-actions";
+    actions.className = "actions";
     const accept = actionButton("Accept visualization");
     const reviseScene = actionButton("Revise scene", "secondary");
     const reviseIntent = actionButton("Rethink intent", "secondary");
@@ -432,7 +685,7 @@ function renderWorkflowAction(
 
   if (state.currentNode === "completed") {
     const card = document.createElement("section");
-    card.className = "workflow-card";
+    card.className = "card";
     const message = document.createElement("p");
     message.textContent = state.nextProjectId
       ? "Your requested revision has started as a linked project with the same explicit preference profile."
@@ -447,6 +700,60 @@ function renderWorkflowAction(
     }
     workflowAction.append(card);
   }
+}
+
+async function renderCheckpointHistory(projectId: string, refresh: () => Promise<void>): Promise<void> {
+  let checkpoints: CheckpointSummary[];
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/checkpoints`, { cache: "no-store" });
+    if (!response.ok) return;
+    ({ checkpoints } = (await response.json()) as { checkpoints: CheckpointSummary[] });
+  } catch {
+    return;
+  }
+  const resumable = checkpoints.filter((checkpoint) => checkpoint.resumable);
+  if (resumable.length === 0) return;
+
+  const card = document.createElement("div");
+  card.className = "card";
+  const heading = document.createElement("h2");
+  heading.textContent = "Rewind to a checkpoint";
+  card.append(heading);
+
+  const fresh = document.createElement("label");
+  fresh.className = "field__why";
+  const freshInput = document.createElement("input");
+  freshInput.type = "checkbox";
+  fresh.append(freshInput, document.createTextNode("Ignore cached steps (regenerate from here)"));
+  card.append(fresh);
+
+  const list = document.createElement("ul");
+  list.className = "checkpoints";
+  for (const checkpoint of resumable) {
+    const item = document.createElement("li");
+    const button = actionButton("", "checkpoint-entry");
+    button.dataset.stage = checkpoint.stage ?? "";
+    const label = document.createElement("strong");
+    label.textContent = `${checkpoint.sequence}. ${humanize(checkpoint.node)}`;
+    const summary = document.createElement("span");
+    summary.textContent = checkpoint.guidance;
+    button.append(label, summary);
+    button.addEventListener("click", () => {
+      void submitWorkflowAction(
+        card,
+        `/api/projects/${encodeURIComponent(projectId)}/resume`,
+        { sequence: checkpoint.sequence, fresh: freshInput.checked },
+        async () => {
+          restartPolling?.();
+          await refresh();
+        },
+      );
+    });
+    item.append(button);
+    list.append(item);
+  }
+  card.append(list);
+  workflowAction.append(card);
 }
 
 async function submitWorkflowAction(
@@ -468,7 +775,7 @@ async function submitWorkflowAction(
     await refresh();
   } catch (error) {
     const message = document.createElement("p");
-    message.className = "workflow-error";
+    message.className = "error-text";
     message.textContent = error instanceof Error ? error.message : String(error);
     container.append(message);
     for (const button of container.querySelectorAll<HTMLButtonElement>("button")) button.disabled = false;
@@ -478,7 +785,7 @@ async function submitWorkflowAction(
 function actionButton(label: string, className = ""): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = className;
+  button.className = `act ${className}`.trim();
   button.textContent = label;
   return button;
 }

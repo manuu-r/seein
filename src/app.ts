@@ -5,6 +5,7 @@ import { ClickHouseContextStore } from "./context/clickhouse-store.js";
 import { MemoryContextStore, type ContextStore } from "./context/context-store.js";
 import { PlaceholderScreenshotDriver, PlaywrightScreenshotDriver, type ScreenshotDriver } from "./render/screenshot-driver.js";
 import { ReferenceCollector } from "./research/reference-collector.js";
+import { DisabledReferenceSearch, FirecrawlReferenceSearch, type ReferenceSearchDriver } from "./research/reference-search.js";
 import { LocalArtifactStore } from "./storage/artifact-store.js";
 import { ProjectManager } from "./storage/project-manager.js";
 import { Orchestrator } from "./workflow/orchestrator.js";
@@ -22,6 +23,7 @@ export interface AppOverrides {
   blender?: BlenderDriver;
   screenshots?: ScreenshotDriver;
   references?: ReferenceCollector;
+  referenceSearch?: ReferenceSearchDriver;
 }
 
 export async function createAppServices(config: Config, overrides: AppOverrides = {}): Promise<AppServices> {
@@ -40,6 +42,11 @@ export async function createAppServices(config: Config, overrides: AppOverrides 
     (config.SCREENSHOT_DRIVER === "playwright"
       ? new PlaywrightScreenshotDriver(config)
       : new PlaceholderScreenshotDriver());
+  const referenceSearch =
+    overrides.referenceSearch ??
+    (config.REFERENCE_SEARCH_DRIVER === "firecrawl"
+      ? new FirecrawlReferenceSearch(config)
+      : new DisabledReferenceSearch());
   await context.migrate();
   const orchestrator = new Orchestrator(
     config,
@@ -48,6 +55,7 @@ export async function createAppServices(config: Config, overrides: AppOverrides 
     context,
     ai,
     overrides.references ?? new ReferenceCollector(config),
+    referenceSearch,
     blender,
     screenshots,
   );

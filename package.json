@@ -7,16 +7,17 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "tsx watch --env-file-if-exists=.env src/server.ts",
     "dev:renderer": "vite --config vite.config.ts",
     "build": "npm run build:renderer && tsc -p tsconfig.server.json",
     "build:renderer": "vite build --config vite.config.ts",
-    "start": "node dist/server/server.js",
-    "demo": "npm run build --silent && node dist/server/cli.js demo",
-    "migrate": "npm run build --silent && node dist/server/cli.js migrate",
+    "start": "node --env-file-if-exists=.env dist/server/server.js",
+    "demo": "npm run build --silent && node --env-file-if-exists=.env dist/server/cli.js demo",
+    "migrate": "npm run build --silent && node --env-file-if-exists=.env dist/server/cli.js migrate",
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "generate": "npm run build --silent && node --env-file-if-exists=.env dist/server/cli.js run"
   },
   "dependencies": {
     "@clickhouse/client": "^1.14.0",

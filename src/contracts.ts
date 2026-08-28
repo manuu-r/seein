@@ -32,7 +32,7 @@ export const ResearchBriefSchema = z.object({
   objectNotes: z.array(z.string().min(1)).max(16),
   styleKeywords: z.array(z.string().min(1)).max(12),
   sources: z.array(SourceSchema).max(12),
-  references: z.array(ReferenceCandidateSchema).max(8),
+  references: z.array(ReferenceCandidateSchema).max(64),
 });
 export type ResearchBrief = z.infer<typeof ResearchBriefSchema>;
 
@@ -275,6 +275,7 @@ export const WorkflowStageSchema = z.enum([
   "refining",
   "rendering_final",
   "awaiting_feedback",
+  "resumed",
   "completed",
   "failed",
 ]);

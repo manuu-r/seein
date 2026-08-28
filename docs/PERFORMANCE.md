@@ -1,6 +1,6 @@
 # Performance and engineering decisions
 
-This document records the speed design and the graph/loop research cross-check as of 2026-08-15.
+This document records the speed design and the graph/loop research cross-check as of 2026-08-25.
 
 ## Critical path
 
@@ -8,7 +8,8 @@ This document records the speed design and the graph/loop research cross-check a
 cold prompt
   -> 1 Gemini clarification call -> user interrupt
   -> 1 Gemini intent/agenda call
-  -> 3 Gemini grounded research calls in parallel
+  -> 3 Gemini 3.7 grounded web-research calls
+     || 1 Gemini 3.1 grounded reference-image search
   -> 1 Gemini synthesis call -> evidence approval interrupt
   -> 1 Gemini scene-plan call
   -> references download || evidence files
@@ -34,7 +35,7 @@ The warm path assumes unchanged cache identities and healthy cached files. Every
 | Cost center | Implementation |
 |---|---|
 | Clarification | Content-addressed by prompt plus explicit preference profile |
-| Gemini research | Three independent grounded calls run concurrently; a slow branch sets latency, not their sum |
+| Gemini research | Three independent 3.7 web-research calls and one 3.1 image-search call run concurrently; the slowest branch sets latency, not their sum |
 | Research synthesis + plan | Separate cacheable calls because approval and feedback can invalidate one without invalidating the other |
 | Repeat AI calls | Phase-specific content-addressed research, plan, and inspection caches |
 | Reference images | Concurrent downloads and a URL-addressed local reference library |
