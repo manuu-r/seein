@@ -225,6 +225,7 @@ const workflowProgress = requiredElement("#workflow-progress");
 const nowSection = requiredElement(".now");
 const flow = requiredElement("#flow");
 const modal = requiredElement("#modal") as HTMLDialogElement;
+const consoleStop = requiredElement("#console-stop");
 const workflowElapsed = requiredElement("#workflow-elapsed");
 const activity = requiredElement("#activity");
 const activityList = requiredElement("#activity-list");
@@ -340,6 +341,53 @@ function openProject(projectId: string): void {
   void runGuidedViewer(projectId).catch((error: unknown) => showWorkflowError(error));
 }
 
+/** Deleting a run is irreversible and removes its files, so it asks first. */
+async function confirmDeleteRun(projectId: string, prompt: string): Promise<void> {
+  const inner = document.createElement("div");
+  inner.className = "modal__inner";
+  const title = document.createElement("h2");
+  title.id = "modal-title";
+  title.className = "modal__title";
+  title.textContent = "Delete this run?";
+  const lede = document.createElement("p");
+  lede.className = "modal__lede";
+  lede.textContent = `"${prompt.slice(0, 120)}" and everything it produced: evidence, reference images, 3D models, renders, and history. Reusable models and research shared with other runs are kept. This cannot be undone.`;
+  const error = document.createElement("p");
+  error.className = "error-text";
+  error.hidden = true;
+
+  const actions = document.createElement("div");
+  actions.className = "modal__actions";
+  const confirm = actionButton("Delete permanently");
+  const cancel = actionButton("Keep it", "secondary");
+  cancel.addEventListener("click", () => modal.close());
+  confirm.addEventListener("click", () => {
+    confirm.disabled = true;
+    confirm.textContent = "Deleting";
+    error.hidden = true;
+    void fetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" })
+      .then(async (response) => {
+        if (!response.ok && response.status !== 204) {
+          const detail = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(detail?.error ?? `Delete failed: ${response.status}`);
+        }
+        modal.close();
+        location.reload();
+      })
+      .catch((cause: unknown) => {
+        error.textContent = cause instanceof Error ? cause.message : String(cause);
+        error.hidden = false;
+        confirm.disabled = false;
+        confirm.textContent = "Delete permanently";
+      });
+  });
+  actions.append(confirm, cancel);
+  inner.append(title, lede, error, actions);
+  modal.replaceChildren(inner);
+  modal.dataset.sequence = "delete";
+  if (!modal.open) modal.showModal();
+}
+
 async function listRecentRuns(): Promise<void> {
   const container = requiredElement("#launcher-recent");
   const response = await fetch("/api/projects", { cache: "no-store" }).catch(() => null);
@@ -365,7 +413,22 @@ async function listRecentRuns(): Promise<void> {
     badge.textContent = project.status.replaceAll("_", " ");
     entry.append(label, badge);
     entry.addEventListener("click", () => openProject(project.projectId));
-    container.append(entry);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "run__delete";
+    remove.title = "Delete this run and its data";
+    remove.setAttribute("aria-label", `Delete run: ${project.prompt}`);
+    remove.textContent = "Delete";
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void confirmDeleteRun(project.projectId, project.prompt);
+    });
+
+    const row = document.createElement("div");
+    row.className = "run";
+    row.append(entry, remove);
+    container.append(row);
   }
   container.hidden = false;
 }
@@ -647,6 +710,53 @@ function startElapsed(): () => void {
   return () => window.clearInterval(timer);
 }
 
+/** Stopping is destructive to in-flight work, so it confirms before firing. */
+function wireStop(projectId: string, refresh: () => Promise<void>): void {
+  consoleStop.addEventListener("click", () => {
+    const inner = document.createElement("div");
+    inner.className = "modal__inner";
+    const title = document.createElement("h2");
+    title.id = "modal-title";
+    title.className = "modal__title";
+    title.textContent = "Stop this run?";
+    const lede = document.createElement("p");
+    lede.className = "modal__lede";
+    lede.textContent = "It stops at the end of the current step. Work already finished is kept and the run can be rewound to a checkpoint; anything in progress is discarded.";
+    const error = document.createElement("p");
+    error.className = "error-text";
+    error.hidden = true;
+    const actions = document.createElement("div");
+    actions.className = "modal__actions";
+    const confirm = actionButton("Stop it");
+    const cancel = actionButton("Keep going", "secondary");
+    cancel.addEventListener("click", () => modal.close());
+    confirm.addEventListener("click", () => {
+      confirm.disabled = true;
+      confirm.textContent = "Stopping";
+      void fetch(`/api/projects/${encodeURIComponent(projectId)}/cancel`, { method: "POST" })
+        .then(async (response) => {
+          if (!response.ok) {
+            const detail = (await response.json().catch(() => null)) as { error?: string } | null;
+            throw new Error(detail?.error ?? `Stop failed: ${response.status}`);
+          }
+          modal.close();
+          await refresh();
+        })
+        .catch((cause: unknown) => {
+          error.textContent = cause instanceof Error ? cause.message : String(cause);
+          error.hidden = false;
+          confirm.disabled = false;
+          confirm.textContent = "Stop it";
+        });
+    });
+    actions.append(confirm, cancel);
+    inner.append(title, lede, error, actions);
+    modal.replaceChildren(inner);
+    modal.dataset.sequence = "stop";
+    if (!modal.open) modal.showModal();
+  });
+}
+
 function wireConsoleToggle(): void {
   const setCollapsed = (collapsed: boolean): void => {
     workflowPanel.dataset.collapsed = String(collapsed);
@@ -690,6 +800,7 @@ async function runGuidedViewer(projectId: string): Promise<void> {
     // A running node marks its ledger row as working so a long model call is
     // visibly alive rather than indistinguishable from a hang.
     nowSection.dataset.working = String(interaction.state.status === "running");
+    consoleStop.hidden = interaction.state.status !== "running";
     await renderActivity(projectId);
     if (!sceneMounted && interaction.state.finalSceneRevision) {
       sceneMounted = true;
@@ -724,6 +835,7 @@ async function runGuidedViewer(projectId: string): Promise<void> {
     startPolling();
   };
 
+  wireStop(projectId, refresh);
   await refresh();
   startPolling();
 }

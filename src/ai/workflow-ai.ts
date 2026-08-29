@@ -131,7 +131,7 @@ export class GeminiWorkflowAI implements WorkflowAI {
     this.ai = new GoogleGenAI({ apiKey: config.GEMINI_API_KEY });
     this.identity = `gemini:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_REFERENCE_MODEL}:${config.GEMINI_PLANNER_MODEL}:${config.GEMINI_INSPECTOR_MODEL}`;
     this.researchIdentity = `gemini-research:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_REFERENCE_MODEL}:surgical-anatomy-v5`;
-    this.planningIdentity = `gemini-planning:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_PLANNER_MODEL}:surgical-anatomy-self-heal-v3`;
+    this.planningIdentity = `gemini-planning:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_PLANNER_MODEL}:surgical-anatomy-self-heal-v4`;
     this.inspectionIdentity = `gemini-inspection:${config.GEMINI_INSPECTOR_MODEL}:surgical-visual-target-comparison-v4`;
     this.clarificationIdentity = `gemini-clarification:${config.GEMINI_PLANNER_MODEL}:surgical-anatomy-v2`;
     this.deepResearchIdentity = `gemini-perspective-research:${config.GEMINI_RESEARCH_MODEL}:surgical-anatomy-v4`;
@@ -380,6 +380,7 @@ Previous plan: ${JSON.stringify(recovery.previousPlan)}
 Preserve correct entities and IDs. Change only the construction, assets, materials, views, or states needed to resolve the evidenced failure. Do not merely restate the previous plan.` : ""}
 
 Constraints:
+- Return actual scene geometry. The plan must contain at least one imported object, a procedural program, or both; never return an empty objects array while omitting procedural.
 - Anatomical fidelity outranks decoration. Do not add generic platforms, markers, furniture, scenery, or contextual props unless the approved intent explicitly requires them.
 - Preserve laterality and use a documented anatomical/operative orientation. Never mirror anatomy implicitly. Include orientation cues in labels or view names when ambiguity is possible.
 - Model every critical structure and relationship required by the approved intent. A label, color, glow, or highlight cannot substitute for missing or unrecognizable geometry.
@@ -429,7 +430,7 @@ dossier; never choose an anatomical variant or laterality silently.` : ""}`;
       ],
       config: {
         responseMimeType: "application/json",
-        responseJsonSchema: toGeminiJsonSchema(ScenePlanSchema),
+        responseJsonSchema: toGeminiScenePlanJsonSchema(),
         thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
       },
     });
@@ -1088,6 +1089,33 @@ function uniqueBy<T>(values: T[], key: (value: T) => string): T[] {
 // Zod re-enforces the real constraint when the response is parsed.
 function toGeminiJsonSchema(schema: z.ZodType): Record<string, unknown> {
   return sanitizeForGemini(z.toJSONSchema(schema)) as Record<string, unknown>;
+}
+
+// Zod refinements are intentionally not emitted by z.toJSONSchema. Express the
+// scene plan's cross-field geometry invariant explicitly so structured output does
+// not permit the invalid objects: [] / no-procedural combination. The general
+// sanitizer removes array bounds to stay below Gemini's schema-complexity limit;
+// keeping this single minItems constraint inside anyOf preserves the invariant
+// without restoring all of those bounds.
+export function toGeminiScenePlanJsonSchema(): Record<string, unknown> {
+  return {
+    ...toGeminiJsonSchema(ScenePlanSchema),
+    anyOf: [
+      {
+        type: "object",
+        title: "Procedural scene construction",
+        required: ["procedural"],
+      },
+      {
+        type: "object",
+        title: "Imported scene construction",
+        properties: {
+          objects: { type: "array", minItems: 1 },
+        },
+        required: ["objects"],
+      },
+    ],
+  };
 }
 
 function sanitizeForGemini(node: unknown): unknown {

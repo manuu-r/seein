@@ -212,8 +212,16 @@ function mergeResearchBrief(base: ResearchBrief, recovery: ResearchBrief): Resea
   };
 }
 
+export class RunStoppedError extends Error {
+  constructor() {
+    super("Stopped by you.");
+    this.name = "RunStoppedError";
+  }
+}
+
 export class Orchestrator {
   private readonly activeRuns = new Map<string, Promise<unknown>>();
+  private readonly cancellations = new Map<string, AbortController>();
   private readonly interactionLocks = new Set<string>();
   private readonly sequences = new Map<string, number>();
   private readonly bypassCache = new Set<string>();
@@ -379,6 +387,20 @@ export class Orchestrator {
       }
     }
     return recovered;
+  }
+
+  async deleteProject(projectId: string): Promise<void> {
+    const project = await this.projects.load(projectId);
+    if (!project) throw new Error("Project not found");
+    // A run mid-flight still holds Blender and Chromium and will keep writing, so
+    // deleting underneath it would leave partial rows and orphaned files.
+    if (this.activeRuns.has(projectId)) {
+      throw new Error("This run is still working. Wait for it to finish or fail before deleting it.");
+    }
+    await this.context.deleteProject(projectId);
+    await this.projects.delete(project);
+    this.sequences.delete(projectId);
+    this.bypassCache.delete(projectId);
   }
 
   async getGraphState(projectId: string): Promise<WorkflowGraphState | null> {
@@ -584,9 +606,42 @@ export class Orchestrator {
 
   private track(projectId: string, task: Promise<unknown>): void {
     this.activeRuns.set(projectId, task);
+    this.cancellations.set(projectId, new AbortController());
     void task.finally(() => {
-      if (this.activeRuns.get(projectId) === task) this.activeRuns.delete(projectId);
+      if (this.activeRuns.get(projectId) === task) {
+        this.activeRuns.delete(projectId);
+        this.cancellations.delete(projectId);
+      }
     }).catch(() => undefined);
+  }
+
+  /**
+   * Cooperative cancellation. The signal is checked at every stage boundary, so a
+   * stop lands as soon as the current step finishes rather than mid-write. Work
+   * already in flight with a provider is abandoned and its result discarded.
+   */
+  private assertRunning(projectId: string): void {
+    if (this.cancellations.get(projectId)?.signal.aborted) throw new RunStoppedError();
+  }
+
+  async cancelProject(projectId: string): Promise<WorkflowGraphState | null> {
+    const controller = this.cancellations.get(projectId);
+    if (!controller) throw new Error("This run is not currently working.");
+    controller.abort();
+    const [project, state] = await Promise.all([this.projects.load(projectId), this.getGraphState(projectId)]);
+    if (!project || !state) return null;
+    const stopped = state.currentNode === "failed"
+      ? state
+      : transitionGraphState(state, "failed", "failed", "You stopped this run. Nothing further will be generated.", {
+          failedNode: state.currentNode,
+          failureMessage: "Stopped by you.",
+        });
+    await Promise.all([
+      this.persistGraphState(project, stopped, { force: true }),
+      this.projects.update(project, { status: "failed", error: "Stopped by you." }),
+      this.emit(project, "failed", "failed", { error: "Stopped by you.", graphNode: state.currentNode }),
+    ]);
+    return stopped;
   }
 
   private async withInteractionLock<T>(projectId: string, work: () => Promise<T>): Promise<T> {
@@ -985,7 +1040,15 @@ export class Orchestrator {
     return this.context.findCachedStep(key);
   }
 
-  private async persistGraphState(project: ProjectRecord, state: WorkflowGraphState): Promise<void> {
+  private async persistGraphState(
+    project: ProjectRecord,
+    state: WorkflowGraphState,
+    options: { force?: boolean } = {},
+  ): Promise<void> {
+    // Every node transition lands here, which makes it the one place that can stop a
+    // run from writing over a state the user already stopped. cancelProject forces
+    // its own write; everything else fails fast so the stop is final.
+    if (!options.force) this.assertRunning(project.projectId);
     const parsed = WorkflowGraphStateSchema.parse(state);
     const relativeRoot = this.projects.relativeRoot(project);
     await Promise.all([
@@ -999,6 +1062,8 @@ export class Orchestrator {
   }
 
   private async failGraph(project: ProjectRecord, state: WorkflowGraphState, error: unknown): Promise<void> {
+    // cancelProject already wrote the stopped state and status.
+    if (error instanceof RunStoppedError) return;
     const message = error instanceof Error ? error.stack ?? error.message : String(error);
     const latest = await this.getGraphState(project.projectId) ?? state;
     const failed = latest.currentNode === "failed"
@@ -1008,7 +1073,7 @@ export class Orchestrator {
           failureMessage: message.slice(0, 8000),
         });
     await Promise.all([
-      this.persistGraphState(project, failed),
+      this.persistGraphState(project, failed, { force: true }),
       this.projects.update(project, { status: "failed", error: message }),
       this.emit(project, "failed", "failed", { error: message, graphNode: latest.currentNode }),
     ]);
@@ -2019,6 +2084,7 @@ export class Orchestrator {
   }
 
   private async stage(project: ProjectRecord, stage: WorkflowStage): Promise<ProjectRecord> {
+    this.assertRunning(project.projectId);
     const next = await this.projects.markStage(project, stage);
     await this.emit(next, stage, "started", {});
     return next;

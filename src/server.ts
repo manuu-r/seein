@@ -60,6 +60,19 @@ app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/scene/lates
   return reply.type("application/json").send(await fs.readFile(path.join(sceneDirectory, latest), "utf8"));
 });
 
+app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/cancel", async (request, reply) => {
+  const state = await services.orchestrator.cancelProject(request.params.projectId);
+  if (!state) return reply.code(404).send({ error: "Project not found" });
+  return reply.code(202).send({ state });
+});
+
+app.delete<{ Params: { projectId: string } }>("/api/projects/:projectId", async (request, reply) => {
+  const project = await services.projects.load(request.params.projectId);
+  if (!project) return reply.code(404).send({ error: "Project not found" });
+  await services.orchestrator.deleteProject(request.params.projectId);
+  return reply.code(204).send();
+});
+
 app.get<{ Params: { projectId: string } }>("/api/projects/:projectId/events", async (request, reply) => {
   const project = await services.projects.load(request.params.projectId);
   if (!project) return reply.code(404).send({ error: "Project not found" });
@@ -133,7 +146,7 @@ app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/rerun", as
 
 app.setErrorHandler((error, _request, reply) => {
   const normalized = error instanceof Error ? error : new Error(String(error));
-  const isStateConflict = /not waiting|still running|No checkpoint at sequence|Generation is blocked|reached the configured|requires feedback|requires a short explanation|interaction update is already|cannot be restarted automatically|No successful checkpoint/i.test(
+  const isStateConflict = /not waiting|still running|No checkpoint at sequence|Generation is blocked|reached the configured|requires feedback|requires a short explanation|interaction update is already|cannot be restarted automatically|No successful checkpoint|not currently working|still working/i.test(
     normalized.message,
   );
   const status = "issues" in normalized ? 400 : isStateConflict ? 409 : 500;

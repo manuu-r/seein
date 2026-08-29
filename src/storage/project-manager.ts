@@ -73,6 +73,16 @@ export class ProjectManager {
     return path.relative(this.dataRoot, project.root).replaceAll(path.sep, "/");
   }
 
+  async delete(project: ProjectRecord): Promise<void> {
+    const projectsRoot = path.resolve(this.dataRoot, "projects");
+    const target = path.resolve(project.root);
+    // Never remove anything that is not inside this store's projects directory.
+    if (target !== projectsRoot && !target.startsWith(`${projectsRoot}${path.sep}`)) {
+      throw new Error(`Refusing to delete a project outside the data root: ${target}`);
+    }
+    await fs.rm(target, { recursive: true, force: true });
+  }
+
   async writeEvent(project: ProjectRecord, event: unknown): Promise<void> {
     const file = path.join(project.root, "logs", "events.ndjson");
     await fs.mkdir(path.dirname(file), { recursive: true });

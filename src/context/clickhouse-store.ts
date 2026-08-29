@@ -814,6 +814,37 @@ export class ClickHouseContextStore implements ContextStore {
     return this.projectFlush;
   }
 
+  async deleteProject(projectId: string): Promise<void> {
+    // Only project-scoped tables. assets, research_cache, workflow_cache and
+    // user_preference_profiles are shared reuse history, not this run's data.
+    const tables = [
+      "run_events",
+      "projects",
+      "workflow_graph_states",
+      "scene_revisions",
+      "scene_objects",
+      "object_relationships",
+      "renders",
+      "qa_reports",
+      "spatial_reports",
+      "spatial_object_facts",
+      "spatial_issues",
+      "procedural_components",
+      "procedure_states",
+      "qa_target_results",
+      "quality_supervisor_states",
+    ];
+    // Events and project records are written in batches; drain them first so a
+    // queued row cannot land after the delete and resurrect the run.
+    await Promise.all([this.flushEvents(), this.flushProjects()]);
+    for (const table of tables) {
+      await this.client.command({
+        query: `DELETE FROM ${table} WHERE project_id = {projectId:String}`,
+        query_params: { projectId },
+      });
+    }
+  }
+
   private async insert(table: string, values: ClickHouseRow[]): Promise<void> {
     await this.client.insert({ table, values, format: "JSONEachRow" });
   }

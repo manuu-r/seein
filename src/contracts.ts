@@ -361,7 +361,13 @@ export const ScenePlanSchema = z.object({
   relationships: z.array(RelationshipSchema).max(20),
   states: z.array(SceneStateSchema).max(8),
   transitions: z.array(SceneTransitionSchema).max(8),
-});
+}).refine(
+  (plan) => plan.objects.length > 0 || plan.procedural !== undefined,
+  {
+    message: "Scene plan must contain imported objects, a procedural program, or both",
+    path: ["objects"],
+  },
+);
 export type ScenePlan = z.infer<typeof ScenePlanSchema>;
 
 export const AssetGeometrySchema = z.object({

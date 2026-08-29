@@ -61,6 +61,12 @@ export interface ContextStore {
   storeGraphState(state: WorkflowGraphState): Promise<void>;
   findUserPreferenceProfile(userId: string): Promise<UserPreferenceProfile | null>;
   storeUserPreferenceProfile(profile: UserPreferenceProfile): Promise<void>;
+  /**
+   * Removes every row belonging to one project. Cross-project reuse (the asset
+   * library, research and step caches, and user preference profiles) is deliberately
+   * left intact: those are not this run's data, they are shared history.
+   */
+  deleteProject(projectId: string): Promise<void>;
 }
 
 export class MemoryContextStore implements ContextStore {
@@ -227,6 +233,21 @@ export class MemoryContextStore implements ContextStore {
 
   async storeUserPreferenceProfile(profile: UserPreferenceProfile): Promise<void> {
     this.userPreferences.set(profile.userId, structuredClone(profile));
+  }
+
+  async deleteProject(projectId: string): Promise<void> {
+    this.projects.delete(projectId);
+    this.graphStates.delete(projectId);
+    this.qualitySupervisorStates.delete(projectId);
+    for (let index = this.scenes.length - 1; index >= 0; index -= 1) {
+      if (this.scenes[index]?.projectId === projectId) this.scenes.splice(index, 1);
+    }
+    for (let index = this.events.length - 1; index >= 0; index -= 1) {
+      if (this.events[index]?.projectId === projectId) this.events.splice(index, 1);
+    }
+    for (const [key, value] of this.proceduralComponents) {
+      if ((value as { projectId?: string }).projectId === projectId) this.proceduralComponents.delete(key);
+    }
   }
 }
 

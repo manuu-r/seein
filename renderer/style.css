@@ -550,3 +550,35 @@ button.act:active:not(:disabled) { transform: translateY(1px); }
 .modal .check:first-of-type { border-top: 0; }
 .modal__detail-link { color: var(--bone-400); font-size: 12px; text-decoration: none; border-bottom: 1px solid var(--rule-strong); justify-self: start; }
 .modal__detail-link:hover { color: var(--bone-100); }
+
+/* Deleting is available but never louder than opening the run. */
+.run { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; border-bottom: 1px solid var(--rule); }
+.run .launcher__run { border-bottom: 0; }
+.run__delete {
+  flex: none;
+  border: 0;
+  padding: 6px 2px;
+  color: transparent;
+  background: transparent;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: color var(--dur) var(--ease);
+}
+.run:hover .run__delete, .run__delete:focus-visible { color: var(--bone-400); }
+.run__delete:hover { color: var(--fail); }
+
+.console__stop {
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r);
+  padding: 4px 10px;
+  color: var(--bone-300);
+  background: transparent;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.console__stop[hidden] { display: none; }
+.console__stop:hover { border-color: var(--fail); color: var(--fail); }
+.console__bar { gap: 8px; }
