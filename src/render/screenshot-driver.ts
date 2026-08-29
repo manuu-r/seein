@@ -16,7 +16,7 @@ export interface ScreenshotDriver {
 }
 
 export class PlaywrightScreenshotDriver implements ScreenshotDriver {
-  readonly identity = "playwright-chromium:v1";
+  readonly identity = "playwright-chromium:explicit-readiness-v2";
   private browserPromise: Promise<Browser> | null = null;
 
   constructor(private readonly config: Config) {}
@@ -35,6 +35,24 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
       await page.waitForFunction(() => (window as unknown as { __SEEIN_READY__?: boolean }).__SEEIN_READY__ === true, undefined, {
         timeout: 30_000,
       });
+      await page.waitForFunction(
+        () => {
+          const state = (window as unknown as {
+            __SEEIN_RENDER_STATE__?: {
+              assetsLoaded?: boolean;
+              proceduralCompiled?: boolean;
+              cameraSettled?: boolean;
+              stableFrames?: number;
+            };
+          }).__SEEIN_RENDER_STATE__;
+          return state?.assetsLoaded === true &&
+            state.proceduralCompiled === true &&
+            state.cameraSettled === true &&
+            (state.stableFrames ?? 0) >= 2;
+        },
+        undefined,
+        { timeout: 30_000 },
+      );
       const viewerErrors = await page.evaluate(
         () => (window as unknown as { __SEEIN_ERRORS__?: string[] }).__SEEIN_ERRORS__ ?? [],
       );

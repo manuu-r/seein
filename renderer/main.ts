@@ -2,6 +2,12 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js";
+import {
+  createProceduralExtrusionGeometry,
+  createProceduralLatheGeometry,
+  createSizedPrimitiveGeometry,
+  createTaperedTubeGeometry,
+} from "../src/scene/procedural-geometry.js";
 
 interface SceneObjectRecord {
   id: string;
@@ -10,8 +16,67 @@ interface SceneObjectRecord {
   rotation: [number, number, number];
   scale: [number, number, number];
   label: string;
+  labelPosition?: [number, number, number];
   labelVisible: boolean;
   highlight: boolean;
+}
+
+interface ProceduralMaterialRecord {
+  id: string;
+  color: string;
+  roughness: number;
+  metalness: number;
+  opacity: number;
+  emissive: string;
+  emissiveIntensity: number;
+  side: "front" | "back" | "double";
+}
+
+interface ProceduralPathPointRecord {
+  landmarkId?: string;
+  position?: [number, number, number];
+  offset: [number, number, number];
+  radius?: number;
+}
+
+interface ProceduralNodeBaseRecord {
+  id: string;
+  name: string;
+  materialId: string;
+  parentId?: string;
+  label: string;
+  labelPosition?: [number, number, number];
+  labelVisible: boolean;
+  highlight: boolean;
+  castShadow: boolean;
+  receiveShadow: boolean;
+  position: [number, number, number];
+  rotation: [number, number, number];
+  scale: [number, number, number];
+}
+
+type ProceduralNodeRecord = ProceduralNodeBaseRecord & (
+  | { kind: "primitive"; shape: "box" | "sphere" | "cylinder" | "cone" | "torus" | "capsule"; size: [number, number, number]; segments: number }
+  | { kind: "tube"; points: ProceduralPathPointRecord[]; radius: number; radialSegments: number; tubularSegments: number; closed: boolean }
+  | { kind: "extrusion"; outline: Array<[number, number]>; depth: number; bevel: number }
+  | { kind: "lathe"; profile: Array<[number, number]>; segments: number }
+  | { kind: "instances"; shape: "box" | "sphere" | "cylinder" | "cone"; size: [number, number, number]; segments: number; instances: Array<{ position: [number, number, number]; rotation: [number, number, number]; scale: [number, number, number] }> }
+);
+
+interface ProceduralProgramRecord {
+  coordinateFrame: { metersPerUnit: number };
+  landmarks: Array<{ id: string; position: [number, number, number] }>;
+  materials: ProceduralMaterialRecord[];
+  nodes: ProceduralNodeRecord[];
+  views: Array<{
+    id: string;
+    label: string;
+    position: [number, number, number];
+    target: [number, number, number];
+    fov: number;
+    required: boolean;
+    stateIds: string[];
+  }>;
 }
 
 interface Manifest {
@@ -20,8 +85,31 @@ interface Manifest {
   camera: { position: [number, number, number]; target: [number, number, number]; fov: number };
   lights: Array<{ id: string; type: string; color: string; intensity: number; position: [number, number, number] }>;
   objects: SceneObjectRecord[];
-  states: Array<{ id: string; label: string; visibleObjects: string[]; highlightedObjects: string[] }>;
-  transitions: Array<{ from: string; to: string; durationMs: number }>;
+  procedural?: ProceduralProgramRecord;
+  states: Array<{
+    id: string;
+    label: string;
+    visibleObjects: string[];
+    highlightedObjects: string[];
+    visibleNodes?: string[];
+    highlightedNodes?: string[];
+    cameraViewId?: string;
+    mutations?: Array<{
+      entityId: string;
+      position?: [number, number, number];
+      rotation?: [number, number, number];
+      scale?: [number, number, number];
+      opacity?: number;
+    }>;
+  }>;
+  transitions: Array<{
+    from: string;
+    to: string;
+    durationMs: number;
+    kind?: "normal" | "alternative" | "complication";
+    condition?: string;
+    description?: string;
+  }>;
 }
 
 interface CheckpointSummary {
@@ -62,7 +150,41 @@ interface WorkflowGraphState {
     };
   };
   finalSceneRevision?: number;
-  finalInspection?: { verdict: string; issue: string; evidence: string };
+  finalInspection?: {
+    verdict: string;
+    issue: string;
+    evidence: string;
+    assessment?: {
+      recognizabilityScore: number;
+      domainFidelityScore: number;
+      visualQualityScore: number;
+      constructionCompletenessScore: number;
+    };
+  };
+  qaCoverage?: {
+    requiredTargets: Array<{ id: string; label: string }>;
+    passedTargetIds: string[];
+    unresolvedTargetIds: string[];
+    refinements: number;
+    complete: boolean;
+    supervisorStatus?: string;
+  };
+  qualitySupervisor?: {
+    status: string;
+    attempt: number;
+    inspections: number;
+    targetedResearchRounds: number;
+    replans: number;
+    logicalAiCalls: number;
+    startedAt: string;
+    deadlineAt: string;
+    bestScores: {
+      recognizability: number;
+      domainFidelity: number;
+      visualQuality: number;
+      constructionCompleteness: number;
+    };
+  };
   qaExhausted?: boolean;
   nextProjectId?: string;
 }
@@ -76,6 +198,14 @@ declare global {
   interface Window {
     __SEEIN_READY__?: boolean;
     __SEEIN_ERRORS__?: string[];
+    __SEEIN_RENDER_STATE__?: {
+      assetsLoaded: boolean;
+      proceduralCompiled: boolean;
+      cameraSettled: boolean;
+      stableFrames: number;
+      stateId: string;
+      viewId: string;
+    };
   }
 }
 
@@ -90,19 +220,35 @@ const workflowGuidance = requiredElement("#workflow-guidance");
 const workflowAction = requiredElement("#workflow-action");
 const launcher = requiredElement("#launcher");
 const stageEmpty = requiredElement("#stage-empty");
+const consoleToggle = requiredElement("#console-toggle");
+const workflowProgress = requiredElement("#workflow-progress");
+const nowSection = requiredElement(".now");
+const flow = requiredElement("#flow");
+const modal = requiredElement("#modal") as HTMLDialogElement;
+const workflowElapsed = requiredElement("#workflow-elapsed");
+const activity = requiredElement("#activity");
+const activityList = requiredElement("#activity-list");
 
 // Assigned by runGuidedViewer, which can run during module evaluation.
 let restartPolling: (() => void) | null = null;
 
 const LAUNCHER_EXAMPLES = [
-  "A compact medieval blacksmith workshop with labeled tools",
-  "A cutaway of a four-stroke engine cycle",
-  "A coral reef ecosystem with labeled species",
+  "Right hepatic hilum anatomy for laparoscopic cholecystectomy, including Calot’s triangle and structures at risk",
+  "Endoscopic endonasal transsphenoidal approach to the pituitary with carotid and optic relationships",
+  "Microsurgical clipping view of a middle cerebral artery bifurcation aneurysm with perforators preserved",
 ];
 
 
 window.__SEEIN_READY__ = false;
 window.__SEEIN_ERRORS__ = [];
+window.__SEEIN_RENDER_STATE__ = {
+  assetsLoaded: false,
+  proceduralCompiled: false,
+  cameraSettled: false,
+  stableFrames: 0,
+  stateId: "",
+  viewId: "",
+};
 
 void start().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
@@ -131,13 +277,14 @@ async function showLauncher(): Promise<void> {
 
     launcher.hidden = false;
   status.hidden = true;
-  title.textContent = "Start a new scene";
+  title.textContent = "Start a surgical anatomy visualization";
 
   for (const example of LAUNCHER_EXAMPLES) {
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = "launcher__chip";
     chip.textContent = example;
+    chip.title = example;
     chip.addEventListener("click", () => {
       prompt.value = example;
       prompt.focus();
@@ -156,7 +303,7 @@ async function showLauncher(): Promise<void> {
       errorLine.textContent = error instanceof Error ? error.message : String(error);
       errorLine.hidden = false;
       submit.disabled = false;
-      submit.textContent = "Generate scene";
+      submit.textContent = "Build visualization";
     });
   });
 
@@ -295,20 +442,49 @@ async function renderManifest(manifestUrl: string): Promise<void> {
       }
     }),
   );
+  if (window.__SEEIN_RENDER_STATE__) window.__SEEIN_RENDER_STATE__.assetsLoaded = true;
 
-  buildStateControls(manifest, objectRoots);
+  if (manifest.procedural) buildProceduralProgram(manifest.procedural, sceneRoot, objectRoots);
+  if (window.__SEEIN_RENDER_STATE__) window.__SEEIN_RENDER_STATE__.proceduralCompiled = true;
+
+  const query = new URLSearchParams(location.search);
+  const requestedView = query.get("view") ?? "";
+  const requestedState = query.get("state") ?? "";
+  const applyView = (viewId: string): void => {
+    const view = manifest.procedural?.views.find((candidate) => candidate.id === viewId);
+    if (!view) return;
+    camera.position.fromArray(view.position);
+    camera.fov = view.fov;
+    camera.updateProjectionMatrix();
+    controls.target.fromArray(view.target);
+    controls.update();
+    if (window.__SEEIN_RENDER_STATE__) {
+      window.__SEEIN_RENDER_STATE__.viewId = viewId;
+      window.__SEEIN_RENDER_STATE__.cameraSettled = true;
+      window.__SEEIN_RENDER_STATE__.stableFrames = 0;
+    }
+  };
+  const selectedView = manifest.procedural?.views.find((view) => view.id === requestedView)
+    ?? manifest.procedural?.views.find((view) => view.required)
+    ?? manifest.procedural?.views[0];
+  if (selectedView) applyView(selectedView.id);
+  else if (window.__SEEIN_RENDER_STATE__) window.__SEEIN_RENDER_STATE__.cameraSettled = true;
+
+  buildStateControls(manifest, objectRoots, applyView, requestedState, requestedView);
   status.textContent = window.__SEEIN_ERRORS__?.length
     ? `Rendered with ${window.__SEEIN_ERRORS__.length} asset error(s)`
-    : `${manifest.objects.length} assets ready`;
-  window.__SEEIN_READY__ = true;
+    : `${manifest.objects.length} anatomical assets · ${manifest.procedural?.nodes.length ?? 0} procedural structures ready`;
 
   const renderFrame = (): void => {
     controls.update();
     renderer.render(scene, camera);
     labelRenderer.render(scene, camera);
+    if (window.__SEEIN_RENDER_STATE__?.cameraSettled) window.__SEEIN_RENDER_STATE__.stableFrames += 1;
     requestAnimationFrame(renderFrame);
   };
   renderFrame();
+  await waitForStableFrames(2);
+  window.__SEEIN_READY__ = true;
 
   addEventListener("resize", () => {
     camera.aspect = innerWidth / innerHeight;
@@ -318,12 +494,180 @@ async function renderManifest(manifestUrl: string): Promise<void> {
   });
 }
 
+interface ProjectEvent {
+  stage?: string;
+  status?: string;
+  detail?: Record<string, unknown>;
+  createdAt?: string;
+}
+
+/**
+ * The event log is written for operators. This turns each stage into something a
+ * person reading the panel can follow, in the present tense while it runs and the
+ * past tense once it lands.
+ */
+const STAGE_STORY: Record<string, { doing: string; done: string }> = {
+  created: { doing: "Starting up", done: "Started" },
+  clarifying: { doing: "Defining the surgical teaching target", done: "Clinical-visual questions ready" },
+  awaiting_clarification: { doing: "Waiting on your answers", done: "Got your answers" },
+  researching: { doing: "Researching anatomy and operative relationships", done: "Anatomical evidence gathered" },
+  auditing_research: { doing: "Auditing anatomical evidence", done: "Anatomical evidence checked" },
+  planning: { doing: "Designing the anatomy construction", done: "Anatomy construction designed" },
+  generating_assets: { doing: "Modelling anatomical structures", done: "Anatomical structures modelled" },
+  resolving_assets: { doing: "Resolving reusable anatomy", done: "3D anatomy ready" },
+  assembling: { doing: "Assembling anatomical relationships", done: "Anatomy assembled" },
+  rendering_initial: { doing: "Rendering the first operative view", done: "First operative view rendered" },
+  rendering_final: { doing: "Rendering the corrected anatomy", done: "Corrected anatomy rendered" },
+  inspecting: { doing: "Inspecting anatomy against evidence", done: "Anatomy render inspected" },
+  refining: { doing: "Correcting the highest-risk mismatch", done: "Anatomical correction applied" },
+  planning_research: { doing: "Planning the medical evidence search", done: "Medical research planned" },
+  awaiting_research_approval: { doing: "Waiting for anatomical evidence approval", done: "Anatomical evidence approved" },
+  awaiting_feedback: { doing: "Waiting for the surgeon’s review", done: "Surgeon review received" },
+  awaiting_quality: { doing: "Checkpointing unresolved quality work", done: "Quality checkpoint saved" },
+  resumed: { doing: "Picking up from a checkpoint", done: "Resumed from a checkpoint" },
+  completed: { doing: "Finishing", done: "Finished" },
+  failed: { doing: "Stopped", done: "Stopped" },
+};
+
+function storyFor(stage: string, status: string): string {
+  const story = STAGE_STORY[stage];
+  if (!story) return humanize(stage);
+  if (status === "failed") return story.doing === "Stopped" ? "The run stopped" : `${story.doing} did not finish`;
+  return status === "completed" ? story.done : story.doing;
+}
+
+/** Plain-language footnote for the numbers worth surfacing. */
+function storyDetail(stage: string, detail: Record<string, unknown> | undefined): string {
+  if (!detail) return "";
+  const num = (key: string): number | undefined =>
+    typeof detail[key] === "number" ? (detail[key] as number) : undefined;
+  const bits: string[] = [];
+
+  const built = num("generated");
+  const reused = num("reused");
+  if (built !== undefined) {
+    bits.push(reused ? `${built} built, ${reused} reused from earlier runs` : `${built} built from scratch`);
+  }
+  const images = num("imagesDownloaded");
+  if (images !== undefined) {
+    const failed = num("downloadFailures");
+    bits.push(failed ? `${images} reference images, ${failed} unavailable` : `${images} reference images`);
+  }
+  const shown = num("referencesShownToPlanner");
+  if (shown !== undefined) bits.push(`${shown} shown to the anatomy planner`);
+  const objects = num("objects");
+  if (objects !== undefined) bits.push(`${objects} anatomical structures`);
+  const issues = num("spatialIssues");
+  if (issues !== undefined) bits.push(issues === 0 ? "no spatial problems" : `${issues} spatial things to verify`);
+  if (typeof detail.verdict === "string") {
+    bits.push(detail.verdict === "pass" ? "anatomy view passes" : `requires a change to ${String(detail.category ?? "the anatomy")}`);
+  }
+  if (typeof detail.error === "string") bits.push(firstUsefulLine(detail.error));
+  if (bits.length === 0 && detail.cacheHit === true) bits.push("reused from an earlier run");
+  return bits.slice(0, 2).join(" · ");
+}
+
+function relativeTime(iso: string | undefined, now: number): string {
+  if (!iso) return "";
+  const seconds = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+  return `${Math.round(seconds / 3600)} hr ago`;
+}
+
+// Stringified errors often start with a bare "ZodError: [", which tells the reader
+// nothing. Prefer the first line that carries an actual message.
+function firstUsefulLine(text: string): string {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  const message = lines.find((line) => /"message"\s*:/.test(line)) ?? lines.find((line) => line.length > 24);
+  const cleaned = (message ?? lines[0] ?? text).replace(/^"message"\s*:\s*"?/, "").replace(/",?$/, "");
+  return cleaned.slice(0, 110);
+}
+
+async function renderActivity(projectId: string): Promise<void> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/events`, { cache: "no-store" })
+    .catch(() => null);
+  if (!response?.ok) return;
+  const { events } = (await response.json()) as { events: ProjectEvent[] };
+
+  // A stage emits "started" then "completed". Collapse each pair into one line so
+  // the reader sees a list of things that happened, not a transaction log.
+  const merged = new Map<string, { stage: string; status: string; detail: Record<string, unknown> | undefined; at: string | undefined; startedAt: string | undefined }>();
+  for (const event of events) {
+    const stage = event.stage ?? "step";
+    const existing = merged.get(stage);
+    if (event.status === "started") {
+      merged.set(stage, { stage, status: "started", detail: undefined, at: event.createdAt, startedAt: event.createdAt });
+    } else {
+      merged.set(stage, {
+        stage,
+        status: event.status ?? "info",
+        detail: event.detail,
+        at: event.createdAt,
+        startedAt: existing?.startedAt,
+      });
+    }
+  }
+
+  const now = Date.now();
+  const rows = [...merged.values()].sort((a, b) => (b.at ?? "").localeCompare(a.at ?? "")).slice(0, 8);
+  if (rows.length === 0) return;
+  activityList.replaceChildren(
+    ...rows.map((row) => {
+      const item = document.createElement("li");
+      item.className = "step";
+      item.dataset.status = row.status;
+      const headline = document.createElement("div");
+      headline.className = "step__what";
+      headline.textContent = storyFor(row.stage, row.status);
+      const meta = document.createElement("div");
+      meta.className = "step__meta";
+      const detail = storyDetail(row.stage, row.detail);
+      const took = row.startedAt && row.at && row.status !== "started"
+        ? `${Math.max(1, Math.round((Date.parse(row.at) - Date.parse(row.startedAt)) / 1000))}s`
+        : "";
+      meta.textContent = [detail, took, relativeTime(row.at, now)].filter(Boolean).join(" · ");
+      item.append(headline);
+      if (meta.textContent) item.append(meta);
+      return item;
+    }),
+  );
+}
+
+function startElapsed(): () => void {
+  const startedAt = Date.now();
+  const tick = (): void => {
+    const seconds = Math.floor((Date.now() - startedAt) / 1000);
+    workflowElapsed.textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+    workflowElapsed.hidden = false;
+  };
+  tick();
+  const timer = window.setInterval(tick, 1000);
+  return () => window.clearInterval(timer);
+}
+
+function wireConsoleToggle(): void {
+  const setCollapsed = (collapsed: boolean): void => {
+    workflowPanel.dataset.collapsed = String(collapsed);
+    consoleToggle.textContent = collapsed ? "Show" : "Hide";
+    consoleToggle.setAttribute("aria-expanded", String(!collapsed));
+  };
+  setCollapsed(false);
+  consoleToggle.addEventListener("click", () => {
+    setCollapsed(workflowPanel.dataset.collapsed !== "true");
+  });
+}
+
 async function runGuidedViewer(projectId: string): Promise<void> {
   workflowPanel.hidden = false;
+  wireConsoleToggle();
   stageEmpty.hidden = false;
-  title.textContent = "Shaping your visualization";
+  title.textContent = "Building surgical anatomy";
   status.textContent = "Waiting for the backend graph…";
   let lastSequence = -1;
+  let lastNode = "";
+  let stopElapsed: (() => void) | null = null;
   let sceneMounted = false;
   let stopped = false;
   let timer = 0;
@@ -335,7 +679,18 @@ async function runGuidedViewer(projectId: string): Promise<void> {
     if (interaction.state.sequence !== lastSequence) {
       lastSequence = interaction.state.sequence;
       renderWorkflowAction(projectId, interaction.state, refresh);
+      // The clock measures the current node, so it restarts whenever the node does.
+      if (interaction.state.currentNode !== lastNode) {
+        lastNode = interaction.state.currentNode;
+        stopElapsed?.();
+        stopElapsed = interaction.state.status === "running" ? startElapsed() : null;
+        if (interaction.state.status !== "running") workflowElapsed.hidden = true;
+      }
     }
+    // A running node marks its ledger row as working so a long model call is
+    // visibly alive rather than indistinguishable from a hang.
+    nowSection.dataset.working = String(interaction.state.status === "running");
+    await renderActivity(projectId);
     if (!sceneMounted && interaction.state.finalSceneRevision) {
       sceneMounted = true;
       stageEmpty.hidden = true;
@@ -345,6 +700,11 @@ async function runGuidedViewer(projectId: string): Promise<void> {
       window.__SEEIN_READY__ = true;
     }
     stopped = interaction.state.status === "completed" || interaction.state.status === "failed";
+    if (stopped) {
+      stopElapsed?.();
+      stopElapsed = null;
+      workflowElapsed.hidden = true;
+    }
   };
 
   const startPolling = (): void => {
@@ -370,6 +730,207 @@ async function runGuidedViewer(projectId: string): Promise<void> {
 
 // Set while the guided viewer is mounted so a rewind can wake the poll loop back up.
 
+/**
+ * Clarification owns the whole screen: it is the only thing being asked, and the
+ * console behind it has nothing to add. Supplied options become selectable chips,
+ * because a suggestion you have to retype is not a suggestion.
+ */
+function renderClarificationFlow(
+  projectId: string,
+  state: WorkflowGraphState,
+  refresh: () => Promise<void>,
+): void {
+  const clarification = state.clarification;
+  if (!clarification) return;
+  if (flow.dataset.sequence === String(state.sequence)) return;
+  flow.dataset.sequence = String(state.sequence);
+
+  const inner = document.createElement("div");
+  inner.className = "flow__inner";
+  const count = document.createElement("p");
+  count.className = "flow__count";
+  count.textContent = `${clarification.questions.length} question${clarification.questions.length === 1 ? "" : "s"} before research`;
+  const lede = document.createElement("p");
+  lede.className = "flow__lede";
+  lede.textContent = clarification.summary;
+
+  const form = document.createElement("form");
+  const answers = new Map<string, string>();
+
+  for (const question of clarification.questions) {
+    const block = document.createElement("section");
+    block.className = "q";
+    const ask = document.createElement("h2");
+    ask.className = "q__ask";
+    ask.textContent = question.question;
+    block.append(ask);
+    if (question.reason) {
+      const why = document.createElement("p");
+      why.className = "q__why";
+      why.textContent = question.reason;
+      block.append(why);
+    }
+
+    const free = document.createElement("textarea");
+    free.rows = 2;
+    free.placeholder = question.options.length > 0 ? "Or write your own" : "Your answer";
+    free.addEventListener("input", () => {
+      answers.set(question.id, free.value.trim());
+      for (const chip of block.querySelectorAll<HTMLButtonElement>(".chip")) {
+        chip.setAttribute("aria-pressed", String(chip.textContent === free.value.trim()));
+      }
+    });
+
+    if (question.options.length > 0) {
+      const chips = document.createElement("div");
+      chips.className = "q__chips";
+      for (const option of question.options) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "chip";
+        chip.textContent = option;
+        chip.setAttribute("aria-pressed", "false");
+        chip.addEventListener("click", () => {
+          const chosen = chip.getAttribute("aria-pressed") === "true";
+          for (const other of chips.querySelectorAll<HTMLButtonElement>(".chip")) {
+            other.setAttribute("aria-pressed", "false");
+          }
+          chip.setAttribute("aria-pressed", String(!chosen));
+          free.value = chosen ? "" : option;
+          answers.set(question.id, free.value);
+        });
+        chips.append(chip);
+      }
+      block.append(chips);
+    }
+    block.append(free);
+    form.append(block);
+  }
+
+  const extra = document.createElement("textarea");
+  extra.rows = 2;
+  extra.placeholder = "Anything else that should shape the anatomy (optional)";
+  const extraBlock = document.createElement("section");
+  extraBlock.className = "q";
+  extraBlock.append(extra);
+  form.append(extraBlock);
+
+  const actions = document.createElement("div");
+  actions.className = "flow__actions";
+  const submit = actionButton("Research the anatomy");
+  submit.type = "submit";
+  const note = document.createElement("span");
+  note.className = "flow__note";
+  note.textContent = "Unanswered questions become stated assumptions.";
+  actions.append(submit, note);
+  form.append(actions);
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const payload = clarification.questions
+      .map((question) => ({ questionId: question.id, answer: (answers.get(question.id) ?? "").trim() }))
+      .filter((entry) => entry.answer);
+    void submitWorkflowAction(
+      form,
+      `/api/projects/${encodeURIComponent(projectId)}/clarifications`,
+      { answers: payload, additionalContext: extra.value.trim() },
+      async () => { flow.hidden = true; await refresh(); },
+    );
+  });
+
+  inner.append(count, lede, form);
+  flow.replaceChildren(inner);
+  flow.hidden = false;
+}
+
+/**
+ * Approval blocks the run, so it is presented as a modal rather than as one more
+ * card in a scrolling rail. When only one action is actually available the modal
+ * offers exactly that action: an audit that still reports gaps cannot be approved,
+ * so it asks to research them instead of showing a disabled button beside a live one.
+ */
+function renderApprovalModal(
+  projectId: string,
+  state: WorkflowGraphState,
+  refresh: () => Promise<void>,
+): void {
+  const dossier = state.researchDossier;
+  if (!dossier) return;
+  if (modal.dataset.sequence === String(state.sequence)) return;
+  modal.dataset.sequence = String(state.sequence);
+
+  const ready = dossier.readiness.decision === "ready";
+  const failing = dossier.readiness.checks.filter((check) => !check.passed);
+
+  const inner = document.createElement("div");
+  inner.className = "modal__inner";
+  const title = document.createElement("h2");
+  title.id = "modal-title";
+  title.className = "modal__title";
+  title.textContent = ready ? "The evidence is ready" : "Some evidence is still missing";
+  const lede = document.createElement("p");
+  lede.className = "modal__lede";
+  lede.textContent = ready
+    ? `${dossier.objectStudies.length} anatomical structures are supported by ${dossier.brief.sources.length} retrieved sources. Building will use only this evidence.`
+    : `${failing.length} of ${dossier.readiness.checks.length} checks did not pass. One more targeted round can look specifically for what is missing.`;
+  inner.append(title, lede);
+
+  for (const check of failing) {
+    const row = document.createElement("div");
+    row.className = "check";
+    row.dataset.passed = "false";
+    const text = document.createElement("div");
+    const label = document.createElement("strong");
+    label.textContent = check.label;
+    const evidence = document.createElement("p");
+    evidence.textContent = check.evidence;
+    text.append(label, evidence);
+    row.append(text);
+    inner.append(row);
+  }
+
+  const form = document.createElement("form");
+  form.method = "dialog";
+  const actions = document.createElement("div");
+  actions.className = "modal__actions";
+
+  const close = async (): Promise<void> => { modal.close(); await refresh(); };
+
+  if (ready) {
+    const approve = actionButton("Approve and build");
+    approve.addEventListener("click", () => {
+      void submitWorkflowAction(form, `/api/projects/${encodeURIComponent(projectId)}/research-decision`,
+        { decision: "approve" }, close);
+    });
+    const more = actionButton("Look for more first", "secondary");
+    more.addEventListener("click", () => {
+      void submitWorkflowAction(form, `/api/projects/${encodeURIComponent(projectId)}/research-decision`,
+        { decision: "research-more" }, close);
+    });
+    actions.append(approve, more);
+  } else {
+    // The only action the backend will accept, so it is the only one offered.
+    const research = actionButton("Research the gaps");
+    research.addEventListener("click", () => {
+      void submitWorkflowAction(form, `/api/projects/${encodeURIComponent(projectId)}/research-decision`,
+        { decision: "research-more" }, close);
+    });
+    actions.append(research);
+  }
+
+  const details = document.createElement("a");
+  details.className = "modal__detail-link";
+  details.href = `/api/projects/${encodeURIComponent(projectId)}/interaction`;
+  details.target = "_blank";
+  details.rel = "noreferrer";
+  details.textContent = "See the full dossier";
+
+  form.append(actions);
+  inner.append(form, details);
+  modal.replaceChildren(inner);
+  if (!modal.open) modal.showModal();
+}
+
 function renderWorkflowAction(
   projectId: string,
   state: WorkflowGraphState,
@@ -377,6 +938,11 @@ function renderWorkflowAction(
 ): void {
   workflowNode.textContent = humanize(state.currentNode);
   workflowGuidance.textContent = state.guidance;
+  // One line answers "how far along am I" so the full ledger can stay folded.
+  const doneCount = state.steps.filter((step) => step.status === "completed").length;
+  const activeIndex = state.steps.findIndex((step) => step.status === "active" || step.status === "waiting");
+  workflowProgress.textContent = `Step ${Math.min(state.steps.length, (activeIndex >= 0 ? activeIndex : doneCount) + 1)} of ${state.steps.length}`;
+  activity.hidden = false;
   workflowSteps.replaceChildren(
     ...state.steps.map((step, index) => {
       const item = document.createElement("li");
@@ -418,209 +984,27 @@ function renderWorkflowAction(
   }
 
   if (state.currentNode === "await-clarification" && state.clarification) {
-    const form = document.createElement("form");
-    form.className = "card";
-    const heading = document.createElement("h2");
-    heading.textContent = state.clarification.summary;
-    form.append(heading);
-    for (const question of state.clarification.questions) {
-      const label = document.createElement("label");
-      label.htmlFor = `answer-${question.id}`;
-      label.append(document.createTextNode(question.question));
-      const reason = document.createElement("span");
-      reason.className = "field__why";
-      reason.textContent = `Why I’m asking: ${question.reason}`;
-      label.append(reason);
-      if (question.options.length > 0) {
-        const options = document.createElement("span");
-        options.className = "field__hint";
-        options.textContent = `Useful starting points: ${question.options.join(" · ")}`;
-        label.append(options);
-      }
-      const answer = document.createElement("textarea");
-      answer.id = `answer-${question.id}`;
-      answer.name = question.id;
-      answer.rows = 2;
-      answer.required = question.required;
-      label.append(answer);
-      form.append(label);
-    }
-    const extra = document.createElement("textarea");
-    extra.name = "additionalContext";
-    extra.rows = 2;
-    extra.placeholder = "Anything else the visualization should respect (optional)";
-    const continueButton = actionButton("Continue to research");
-    continueButton.type = "submit";
-    form.append(extra, continueButton);
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const data = new FormData(form);
-      const answers = state.clarification!.questions.map((question) => ({
-        questionId: question.id,
-        answer: String(data.get(question.id) ?? "").trim(),
-      })).filter((answer) => answer.answer);
-      void submitWorkflowAction(
-        form,
-        `/api/projects/${encodeURIComponent(projectId)}/clarifications`,
-        { answers, additionalContext: String(data.get("additionalContext") ?? "").trim() },
-        refresh,
-      );
-    });
-    workflowAction.append(form);
-    return;
+    renderClarificationFlow(projectId, state, refresh);
+  } else {
+    flow.hidden = true;
   }
 
   if (state.currentNode === "await-research-approval" && state.researchDossier) {
-    const dossier = state.researchDossier;
-    const card = document.createElement("section");
-    card.className = "card";
-    const checks = dossier.readiness.checks;
-    const failing = checks.filter((check) => !check.passed);
-    const heading = document.createElement("h2");
-    heading.textContent = failing.length === 0
-      ? "Evidence is ready"
-      : `${failing.length} of ${checks.length} checks still blocking`;
-    const score = document.createElement("span");
-    score.className = "readiness__score";
-    score.textContent = `${Math.round(dossier.readiness.score * 100)}%`;
-    heading.append(score);
-    card.append(heading);
-
-    // Blocking checks lead; the passing ones stay auditable but out of the way.
-    for (const check of failing) {
-      const row = document.createElement("div");
-      row.className = "check";
-      row.dataset.passed = "false";
-      const label = document.createElement("strong");
-      label.textContent = check.label;
-      const evidence = document.createElement("div");
-      evidence.className = "field__why";
-      evidence.textContent = check.evidence;
-      const text = document.createElement("div");
-      text.append(label, evidence);
-      row.append(text);
-      card.append(row);
-    }
-    if (failing.length < checks.length) {
-      const passed = document.createElement("details");
-      passed.className = "passed";
-      const summary = document.createElement("summary");
-      summary.textContent = `${checks.length - failing.length} checks passed`;
-      passed.append(summary);
-      for (const check of checks.filter((check) => check.passed)) {
-        const row = document.createElement("div");
-        row.className = "check";
-        row.dataset.passed = "true";
-        const text = document.createElement("div");
-        const label = document.createElement("strong");
-        label.textContent = check.label;
-        const evidence = document.createElement("div");
-        evidence.className = "field__why";
-        evidence.textContent = check.evidence;
-        text.append(label, evidence);
-        row.append(text);
-        passed.append(row);
-      }
-      card.append(passed);
-    }
-
-    // Each study with the references the planner will actually be shown, so the
-    // evidence can be judged before generation rather than after.
-    const studies = document.createElement("div");
-    studies.className = "specimens";
-    for (const study of dossier.objectStudies) {
-      const entry = document.createElement("div");
-      entry.className = "specimen";
-      const name = document.createElement("div");
-      name.className = "specimen__name";
-      name.textContent = study.name;
-      entry.append(name);
-      const images = study.referenceImageUrls ?? [];
-      if (images.length > 0) {
-        const strip = document.createElement("div");
-        strip.className = "sheet";
-        for (const url of images.slice(0, 4)) {
-          const frame = document.createElement("a");
-          frame.href = url;
-          frame.target = "_blank";
-          frame.rel = "noreferrer";
-          const thumb = document.createElement("img");
-          thumb.src = url;
-          thumb.alt = "";
-          thumb.loading = "lazy";
-          thumb.decoding = "async";
-          // Several publishers block hotlinking, so a thumbnail can fail in the
-          // browser even though the backend downloaded it for the planner. Keep the
-          // tile, drop the broken-image glyph, and say the planner still has it.
-          thumb.addEventListener("error", () => {
-            frame.dataset.unavailable = "true";
-            frame.title = "Preview blocked by the source site. The planner still received this image.";
-            thumb.remove();
-          });
-          frame.append(thumb);
-          strip.append(frame);
-        }
-        entry.append(strip);
-      } else {
-        const none = document.createElement("span");
-        none.className = "specimen__none";
-        none.textContent = "No reference image; this object is modelled from text alone.";
-        entry.append(none);
-      }
-      studies.append(entry);
-    }
-    card.append(studies);
-    if (dossier.searchAttribution) {
-      const attribution = document.createElement("details");
-      attribution.className = "attribution";
-      const summary = document.createElement("summary");
-      summary.textContent = "Google Image Search suggestions and attribution";
-      const frame = document.createElement("iframe");
-      frame.title = "Google Image Search attribution";
-      frame.setAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox");
-      frame.srcdoc = dossier.searchAttribution.renderedContent;
-      attribution.append(summary, frame);
-      card.append(attribution);
-    }
-    const feedback = document.createElement("textarea");
-    feedback.rows = 2;
-    feedback.placeholder = "What evidence is still missing? (required only for more research)";
-    const actions = document.createElement("div");
-    actions.className = "actions";
-    const approve = actionButton("Approve generation");
-    approve.disabled = dossier.readiness.decision !== "ready";
-    if (approve.disabled) {
-      approve.title = `Blocked by: ${failing.map((check) => check.label).join("; ")}`;
-    }
-    const more = actionButton("Research this gap", "secondary");
-    actions.append(approve, more);
-    card.append(feedback, actions);
-    approve.addEventListener("click", () => void submitWorkflowAction(
-      card,
-      `/api/projects/${encodeURIComponent(projectId)}/research-decision`,
-      { decision: "approve", feedback: feedback.value.trim() },
-      refresh,
-    ));
-    more.addEventListener("click", () => void submitWorkflowAction(
-      card,
-      `/api/projects/${encodeURIComponent(projectId)}/research-decision`,
-      { decision: "research-more", feedback: feedback.value.trim() },
-      refresh,
-    ));
-    workflowAction.append(card);
-    return;
+    renderApprovalModal(projectId, state, refresh);
   }
 
   if (state.currentNode === "await-feedback") {
     const card = document.createElement("section");
     card.className = "card";
     const heading = document.createElement("h2");
-    heading.textContent = state.finalInspection?.verdict === "pass" ? "The bounded visual QA passed" : "Review the final bounded result";
+    heading.textContent = state.finalInspection?.verdict === "pass"
+      ? "Surgeon-facing visual QA passed"
+      : "Review the final anatomy visualization";
     const evidence = document.createElement("p");
-    evidence.textContent = state.finalInspection?.evidence || "Explore the scene states and inspect the result.";
+    evidence.textContent = state.finalInspection?.evidence || "Explore every anatomy, approach, and procedure state before accepting the result.";
     const categories = document.createElement("div");
     categories.className = "categories";
-    for (const category of ["identity", "missing-part", "scale", "layout", "lighting", "label", "teaching-order", "style", "other"]) {
+    for (const category of ["anatomy", "laterality", "missing-part", "critical-structure", "surgical-approach", "procedure-step", "scale", "occlusion", "lighting", "label", "teaching-order", "style", "other"]) {
       const label = document.createElement("label");
       const input = document.createElement("input");
       input.type = "checkbox";
@@ -631,7 +1015,7 @@ function renderWorkflowAction(
     }
     const comment = document.createElement("textarea");
     comment.rows = 3;
-    comment.placeholder = "What should change, and why?";
+    comment.placeholder = "Name the incorrect or missing anatomy, relationship, view, or procedure step and what it should show.";
     const preferenceLabel = document.createElement("label");
     preferenceLabel.textContent = "Optional preference to carry into future projects";
     const preferenceKey = document.createElement("select");
@@ -654,9 +1038,9 @@ function renderWorkflowAction(
     preferenceLabel.append(preferenceKey, preferenceValue);
     const actions = document.createElement("div");
     actions.className = "actions";
-    const accept = actionButton("Accept visualization");
-    const reviseScene = actionButton("Revise scene", "secondary");
-    const reviseIntent = actionButton("Rethink intent", "secondary");
+    const accept = actionButton("Accept anatomy visualization");
+    const reviseScene = actionButton("Correct anatomy", "secondary");
+    const reviseIntent = actionButton("Revise clinical intent", "secondary");
     actions.append(accept, reviseScene, reviseIntent);
     card.append(heading, evidence, categories, comment, preferenceLabel, actions);
     const submit = (decision: string): void => {
@@ -683,13 +1067,37 @@ function renderWorkflowAction(
     return;
   }
 
+  if (state.currentNode === "quality-blocked") {
+    const card = document.createElement("section");
+    card.className = "card";
+    const heading = document.createElement("h2");
+    heading.textContent = "Anatomical construction is not complete yet";
+    const coverage = state.qaCoverage;
+    const detail = document.createElement("p");
+    detail.textContent = coverage
+      ? `${coverage.passedTargetIds.length}/${coverage.requiredTargets.length} required state/view checks pass at revision ${state.finalSceneRevision ?? "?"}. ${coverage.unresolvedTargetIds.length} remain unresolved after ${coverage.refinements} correction(s).`
+      : "A required anatomical quality gate remains unresolved. This visualization cannot be accepted until every required operative view passes.";
+    const evidence = document.createElement("p");
+    evidence.className = "field__why";
+    evidence.textContent = state.finalInspection?.evidence ?? "Use the generation checkpoint below to continue the correction loop.";
+    const supervisor = state.qualitySupervisor;
+    const supervisorDetail = document.createElement("p");
+    supervisorDetail.className = "field__why";
+    supervisorDetail.textContent = supervisor
+      ? `Supervisor: ${humanize(supervisor.status)} · ${supervisor.attempt} repair action(s) · ${supervisor.inspections} inspection(s) · ${supervisor.targetedResearchRounds} targeted research round(s) · ${supervisor.replans} replan(s) · ${supervisor.logicalAiCalls} logical AI call(s). Best scores — recognizability ${Math.round(supervisor.bestScores.recognizability * 100)}%, domain fidelity ${Math.round(supervisor.bestScores.domainFidelity * 100)}%, visual quality ${Math.round(supervisor.bestScores.visualQuality * 100)}%, construction ${Math.round(supervisor.bestScores.constructionCompleteness * 100)}%.`
+      : "The backend quality supervisor stopped at a durable checkpoint.";
+    card.append(heading, detail, evidence, supervisorDetail);
+    workflowAction.append(card);
+    return;
+  }
+
   if (state.currentNode === "completed") {
     const card = document.createElement("section");
     card.className = "card";
     const message = document.createElement("p");
     message.textContent = state.nextProjectId
       ? "Your requested revision has started as a linked project with the same explicit preference profile."
-      : "This visualization is accepted and its reusable evidence, assets, and preferences are indexed.";
+      : "This anatomy visualization is accepted and its reusable evidence, structures, views, and preferences are indexed.";
     card.append(message);
     if (state.nextProjectId) {
       const link = document.createElement("a");
@@ -797,13 +1205,139 @@ function graphStatus(state: WorkflowGraphState): string {
 }
 
 function humanize(value: string): string {
-  return value.replaceAll("-", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return value.replaceAll("-", " ").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function showWorkflowError(error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   status.textContent = message;
   status.style.color = "#fca5a5";
+}
+
+function buildProceduralProgram(
+  program: ProceduralProgramRecord,
+  sceneRoot: THREE.Group,
+  objectRoots: Map<string, THREE.Object3D>,
+): void {
+  const programRoot = new THREE.Group();
+  programRoot.name = "ProceduralRoot";
+  programRoot.scale.setScalar(program.coordinateFrame.metersPerUnit);
+  sceneRoot.add(programRoot);
+
+  const landmarks = new Map(program.landmarks.map((landmark) => [landmark.id, landmark.position]));
+  const materials = new Map(program.materials.map((record) => [record.id, record]));
+  const built = new Map<string, THREE.Object3D>();
+
+  for (const node of program.nodes) {
+    const materialRecord = materials.get(node.materialId);
+    if (!materialRecord) throw new Error(`Procedural node ${node.id} uses missing material ${node.materialId}`);
+    const material = createProceduralMaterial(materialRecord);
+    const root = createProceduralNode(node, material, landmarks);
+    root.name = node.id;
+    root.position.fromArray(node.position);
+    root.rotation.fromArray([...node.rotation, "XYZ"]);
+    root.scale.fromArray(node.scale);
+    root.traverse((child) => {
+      if (!(child instanceof THREE.Mesh)) return;
+      child.castShadow = node.castShadow;
+      child.receiveShadow = node.receiveShadow;
+    });
+    if (node.highlight) setHighlight(root, true);
+    addSceneLabel(root, node.label, node.labelVisible, node.labelPosition);
+    built.set(node.id, root);
+    objectRoots.set(node.id, root);
+  }
+
+  for (const node of program.nodes) {
+    const root = built.get(node.id)!;
+    const parent = node.parentId ? built.get(node.parentId) : undefined;
+    (parent ?? programRoot).add(root);
+  }
+}
+
+function createProceduralMaterial(record: ProceduralMaterialRecord): THREE.MeshPhysicalMaterial {
+  return new THREE.MeshPhysicalMaterial({
+    color: record.color,
+    roughness: record.roughness,
+    metalness: record.metalness,
+    opacity: record.opacity,
+    transparent: record.opacity < 0.999,
+    depthWrite: record.opacity >= 0.999,
+    emissive: record.emissive,
+    emissiveIntensity: record.emissiveIntensity,
+    side: record.side === "double" ? THREE.DoubleSide : record.side === "back" ? THREE.BackSide : THREE.FrontSide,
+    clearcoat: record.metalness > 0.35 ? 0.18 : 0.04,
+    clearcoatRoughness: Math.min(1, record.roughness + 0.1),
+  });
+}
+
+function createProceduralNode(
+  node: ProceduralNodeRecord,
+  material: THREE.Material,
+  landmarks: Map<string, [number, number, number]>,
+): THREE.Object3D {
+  if (node.kind === "instances") {
+    const geometry = createSizedPrimitiveGeometry(node.shape, node.size, node.segments);
+    const mesh = new THREE.InstancedMesh(geometry, material, node.instances.length);
+    const matrix = new THREE.Matrix4();
+    const quaternion = new THREE.Quaternion();
+    for (const [index, instance] of node.instances.entries()) {
+      quaternion.setFromEuler(new THREE.Euler(...instance.rotation, "XYZ"));
+      matrix.compose(new THREE.Vector3(...instance.position), quaternion, new THREE.Vector3(...instance.scale));
+      mesh.setMatrixAt(index, matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    return mesh;
+  }
+
+  let geometry: THREE.BufferGeometry;
+  if (node.kind === "primitive") {
+    geometry = createSizedPrimitiveGeometry(node.shape, node.size, node.segments);
+  } else if (node.kind === "tube") {
+    const points = node.points.map((point, index) => {
+      const source = point.position ?? (point.landmarkId ? landmarks.get(point.landmarkId) : undefined);
+      if (!source) throw new Error(`Tube ${node.id} point ${index} has no resolvable coordinate`);
+      return {
+        position: new THREE.Vector3(source[0] + point.offset[0], source[1] + point.offset[1], source[2] + point.offset[2]),
+        radius: point.radius ?? node.radius,
+      };
+    });
+    geometry = createTaperedTubeGeometry(points, node.tubularSegments, node.radialSegments, node.closed);
+  } else if (node.kind === "extrusion") {
+    geometry = createProceduralExtrusionGeometry(node.outline, node.depth, node.bevel);
+  } else {
+    geometry = createProceduralLatheGeometry(node.profile, node.segments);
+  }
+  geometry.computeVertexNormals();
+  return new THREE.Mesh(geometry, material);
+}
+
+function addSceneLabel(
+  root: THREE.Object3D,
+  text: string,
+  visible: boolean,
+  position?: [number, number, number],
+): void {
+  const label = document.createElement("div");
+  label.className = "scene-label";
+  label.textContent = text;
+  label.hidden = !visible;
+  const labelObject = new CSS2DObject(label);
+  const bounds = new THREE.Box3().setFromObject(root);
+  const height = bounds.isEmpty() ? 0.5 : bounds.max.y - bounds.min.y;
+  if (position) labelObject.position.fromArray(position);
+  else labelObject.position.set(0, Math.max(0.25, height / 2 + 0.15), 0);
+  root.add(labelObject);
+}
+
+async function waitForStableFrames(required: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const check = (): void => {
+      if ((window.__SEEIN_RENDER_STATE__?.stableFrames ?? 0) >= required) resolve();
+      else requestAnimationFrame(check);
+    };
+    check();
+  });
 }
 
 function addEnvironment(root: THREE.Group, manifest: Manifest): void {
@@ -828,14 +1362,26 @@ function addEnvironment(root: THREE.Group, manifest: Manifest): void {
   }
 }
 
-function buildStateControls(manifest: Manifest, objects: Map<string, THREE.Object3D>): void {
-  let activeStateId = manifest.states[0]?.id ?? "";
+function buildStateControls(
+  manifest: Manifest,
+  objects: Map<string, THREE.Object3D>,
+  applyView: (viewId: string) => void,
+  requestedState = "",
+  lockedViewId = "",
+): void {
+  const initialState = manifest.states.find((state) => state.id === requestedState) ?? manifest.states[0];
+  let activeStateId = initialState?.id ?? "";
   let animationToken = 0;
+  const baseTransforms = new Map([...objects].map(([id, object]) => [id, {
+    position: object.position.clone(),
+    quaternion: object.quaternion.clone(),
+    scale: object.scale.clone(),
+  }]));
   const applyState = (stateId: string, immediate = false): void => {
     const state = manifest.states.find((candidate) => candidate.id === stateId);
     if (!state) return;
-    const visible = new Set(state.visibleObjects);
-    const highlighted = new Set(state.highlightedObjects);
+    const visible = new Set([...state.visibleObjects, ...(state.visibleNodes ?? [])]);
+    const highlighted = new Set([...state.highlightedObjects, ...(state.highlightedNodes ?? [])]);
     for (const button of stateControls.querySelectorAll("button")) {
       button.setAttribute("aria-pressed", String(button.dataset.state === stateId));
     }
@@ -843,9 +1389,17 @@ function buildStateControls(manifest: Manifest, objects: Map<string, THREE.Objec
       ? 0
       : manifest.transitions.find((transition) => transition.from === activeStateId && transition.to === stateId)?.durationMs ?? 350;
     activeStateId = stateId;
+    if (window.__SEEIN_RENDER_STATE__) window.__SEEIN_RENDER_STATE__.stateId = stateId;
+    if (state.cameraViewId && !lockedViewId) applyView(state.cameraViewId);
     animationToken += 1;
     const token = animationToken;
-    const starting = new Map([...objects].map(([id, object]) => [id, object.visible ? 1 : 0]));
+    const mutations = new Map((state.mutations ?? []).map((mutation) => [mutation.entityId, mutation]));
+    const starting = new Map([...objects].map(([id, object]) => [id, {
+      opacity: Number(object.userData.seeinOpacityMultiplier ?? (object.visible ? 1 : 0)),
+      position: object.position.clone(),
+      quaternion: object.quaternion.clone(),
+      scale: object.scale.clone(),
+    }]));
     for (const object of objects.values()) object.visible = true;
     const startedAt = performance.now();
     const tick = (now: number): void => {
@@ -853,12 +1407,23 @@ function buildStateControls(manifest: Manifest, objects: Map<string, THREE.Objec
       const progress = duration === 0 ? 1 : Math.min(1, (now - startedAt) / duration);
       const eased = 1 - Math.pow(1 - progress, 3);
       for (const [id, object] of objects) {
-        const start = starting.get(id) ?? 0;
-        const target = visible.has(id) ? 1 : 0;
-        setOpacity(object, start + (target - start) * eased);
+        const start = starting.get(id);
+        const base = baseTransforms.get(id);
+        if (!start || !base) continue;
+        const mutation = mutations.get(id);
+        const targetOpacity = visible.has(id) ? (mutation?.opacity ?? 1) : 0;
+        const targetPosition = mutation?.position ? new THREE.Vector3(...mutation.position) : base.position;
+        const targetQuaternion = mutation?.rotation
+          ? new THREE.Quaternion().setFromEuler(new THREE.Euler(...mutation.rotation, "XYZ"))
+          : base.quaternion;
+        const targetScale = mutation?.scale ? new THREE.Vector3(...mutation.scale) : base.scale;
+        setOpacity(object, start.opacity + (targetOpacity - start.opacity) * eased);
+        object.position.copy(start.position).lerp(targetPosition, eased);
+        object.quaternion.copy(start.quaternion).slerp(targetQuaternion, eased);
+        object.scale.copy(start.scale).lerp(targetScale, eased);
         if (progress === 1) {
-          object.visible = target === 1;
-          setOpacity(object, 1);
+          object.visible = targetOpacity > 0;
+          setOpacity(object, targetOpacity);
           setHighlight(object, highlighted.has(id));
         }
       }
@@ -874,7 +1439,7 @@ function buildStateControls(manifest: Manifest, objects: Map<string, THREE.Objec
     button.addEventListener("click", () => applyState(state.id));
     stateControls.append(button);
   }
-  if (manifest.states[0]) applyState(manifest.states[0].id, true);
+  if (initialState) applyState(initialState.id, true);
 }
 
 function setHighlight(root: THREE.Object3D, enabled: boolean): void {
@@ -883,20 +1448,34 @@ function setHighlight(root: THREE.Object3D, enabled: boolean): void {
     const materials = Array.isArray(node.material) ? node.material : [node.material];
     for (const material of materials) {
       if (!(material instanceof THREE.MeshStandardMaterial)) continue;
-      material.emissive.set(enabled ? "#0ea5e9" : "#000000");
-      material.emissiveIntensity = enabled ? 0.25 : 0;
+      if (!material.userData.seeinOriginalEmissive) {
+        material.userData.seeinOriginalEmissive = material.emissive.getHexString();
+        material.userData.seeinOriginalEmissiveIntensity = material.emissiveIntensity;
+      }
+      material.emissive.set(enabled ? "#0ea5e9" : `#${String(material.userData.seeinOriginalEmissive)}`);
+      material.emissiveIntensity = enabled
+        ? Math.max(0.25, Number(material.userData.seeinOriginalEmissiveIntensity ?? 0))
+        : Number(material.userData.seeinOriginalEmissiveIntensity ?? 0);
     }
   });
 }
 
 function setOpacity(root: THREE.Object3D, opacity: number): void {
+  root.userData.seeinOpacityMultiplier = opacity;
   root.traverse((node) => {
     if (!(node instanceof THREE.Mesh)) return;
     const materials = Array.isArray(node.material) ? node.material : [node.material];
     for (const material of materials) {
-      material.transparent = opacity < 0.999;
-      material.opacity = opacity;
-      material.depthWrite = opacity >= 0.999;
+      if (material.userData.seeinBaseOpacity === undefined) {
+        material.userData.seeinBaseOpacity = material.opacity;
+        material.userData.seeinBaseDepthWrite = material.depthWrite;
+      }
+      const baseOpacity = Number(material.userData.seeinBaseOpacity ?? 1);
+      material.opacity = baseOpacity * opacity;
+      material.transparent = material.opacity < 0.999;
+      material.depthWrite = opacity >= 0.999
+        ? Boolean(material.userData.seeinBaseDepthWrite)
+        : false;
     }
   });
 }

@@ -7,8 +7,9 @@ import {
   type Vec3,
 } from "../contracts.js";
 import { transformBoundsByTrs } from "./geometry-bounds.js";
+import { analyzeProceduralProgram } from "./procedural-analyzer.js";
 
-export const SPATIAL_ANALYZER_IDENTITY = "measured-glb-bounds-and-camera:v2";
+export const SPATIAL_ANALYZER_IDENTITY = "measured-glb-and-procedural-bounds:v3";
 
 interface Bounds {
   min: Vec3;
@@ -19,17 +20,34 @@ export function analyzeSpatial(
   plan: ScenePlan,
   manifest: SceneManifest,
   assets: Map<string, ResolvedAsset>,
+  target?: { stateId?: string | undefined; viewId?: string | undefined },
 ): SpatialReport {
+  const state = target?.stateId ? manifest.states.find((candidate) => candidate.id === target.stateId) : undefined;
+  const view = target?.viewId ? manifest.procedural?.views.find((candidate) => candidate.id === target.viewId) : undefined;
+  const camera = view ?? manifest.camera;
+  const stateMutations = new Map((state?.mutations ?? []).map((mutation) => [mutation.entityId, mutation]));
+  const visibleIds = state
+    ? new Set(
+        [...state.visibleObjects, ...state.visibleNodes]
+          .filter((id) => stateMutations.get(id)?.opacity !== 0),
+      )
+    : null;
   const plannedObjects = new Map(plan.objects.map((object) => [object.id, object]));
   const objectBounds = new Map<string, Bounds>();
-  const objects = manifest.objects.map((object) => {
+  const importedObjects = manifest.objects.map((object) => {
     const planned = plannedObjects.get(object.id);
     const asset = planned ? assets.get(planned.assetSpecId) : undefined;
     if (!asset) throw new Error(`Spatial analysis is missing a resolved asset for ${object.id}`);
     if (!asset.geometry) throw new Error(`Spatial analysis refuses unmeasured GLB geometry for ${object.id}`);
-    const bounds = transformBoundsByTrs(asset.geometry.bounds, object.position, object.rotation, object.scale);
+    const mutation = stateMutations.get(object.id);
+    const bounds = transformBoundsByTrs(
+      asset.geometry.bounds,
+      mutation?.position ?? object.position,
+      mutation?.rotation ?? object.rotation,
+      mutation?.scale ?? object.scale,
+    );
     objectBounds.set(object.id, bounds);
-    const projection = projectBounds(bounds, manifest.camera.position, manifest.camera.target, manifest.camera.fov);
+    const projection = projectBounds(bounds, camera.position, camera.target, camera.fov);
     return {
       objectId: object.id,
       assetId: asset.assetId,
@@ -43,14 +61,34 @@ export function analyzeSpatial(
       inFrame: projection.inFrame,
     };
   });
-  const issues: SpatialReport["issues"] = [];
+  const proceduralProgram = manifest.procedural ? structuredClone(manifest.procedural) : undefined;
+  if (proceduralProgram) {
+    for (const node of proceduralProgram.nodes) {
+      const mutation = stateMutations.get(node.id);
+      if (!mutation) continue;
+      if (mutation.position) node.position = mutation.position;
+      if (mutation.rotation) node.rotation = mutation.rotation;
+      if (mutation.scale) node.scale = mutation.scale;
+    }
+  }
+  const procedural = proceduralProgram
+    ? analyzeProceduralProgram(
+        proceduralProgram,
+        (bounds) => projectBounds(bounds, camera.position, camera.target, camera.fov),
+      )
+    : null;
+  for (const fact of procedural?.facts ?? []) objectBounds.set(fact.objectId, fact.bounds);
+  const objects = [...importedObjects, ...(procedural?.facts ?? [])];
+  const issues: SpatialReport["issues"] = [...(procedural?.issues ?? [])];
   for (const object of objects) {
+    if (visibleIds && !visibleIds.has(object.objectId)) continue;
+    const isImported = object.geometrySource === "glb-accessors:v1";
     const supportRelation = manifest.relationships.find(
       (relation) =>
         (relation.type === "on" && relation.from === object.objectId) ||
         (relation.type === "supports" && relation.to === object.objectId),
     );
-    if (object.floorClearance > 0.08) {
+    if (isImported && object.floorClearance > 0.08) {
       const supportId = supportRelation
         ? supportRelation.type === "on"
           ? supportRelation.to
@@ -90,11 +128,12 @@ export function analyzeSpatial(
       });
     }
   }
-  for (let leftIndex = 0; leftIndex < objects.length; leftIndex += 1) {
-    for (let rightIndex = leftIndex + 1; rightIndex < objects.length; rightIndex += 1) {
-      const left = objects[leftIndex];
-      const right = objects[rightIndex];
+  for (let leftIndex = 0; leftIndex < importedObjects.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < importedObjects.length; rightIndex += 1) {
+      const left = importedObjects[leftIndex];
+      const right = importedObjects[rightIndex];
       if (!left || !right) continue;
+      if (visibleIds && (!visibleIds.has(left.objectId) || !visibleIds.has(right.objectId))) continue;
       const leftBounds = objectBounds.get(left.objectId);
       const rightBounds = objectBounds.get(right.objectId);
       if (!leftBounds || !rightBounds) continue;
@@ -117,10 +156,25 @@ export function analyzeSpatial(
       }
     }
   }
+  if (proceduralProgram && target?.viewId) {
+    for (const invariant of proceduralProgram.invariants) {
+      if (invariant.kind !== "visible" || invariant.viewId !== target.viewId) continue;
+      if (visibleIds && !visibleIds.has(invariant.nodeId)) {
+        issues.push({
+          category: "visibility",
+          severity: invariant.required ? "error" : "warning",
+          objectIds: [invariant.nodeId],
+          evidence: `${invariant.label} requires ${invariant.nodeId} in view ${target.viewId}, but state ${target.stateId ?? "default"} hides it.`,
+        });
+      }
+    }
+  }
   const sceneBounds = combineBounds([...objectBounds.values()]);
   return SpatialReportSchema.parse({
     schemaVersion: "2.0",
-    analyzer: SPATIAL_ANALYZER_IDENTITY,
+    analyzer: target
+      ? `${SPATIAL_ANALYZER_IDENTITY}:${target.stateId ?? "all"}:${target.viewId ?? "default"}`
+      : SPATIAL_ANALYZER_IDENTITY,
     sceneRevision: manifest.revision,
     sceneBounds,
     objects,

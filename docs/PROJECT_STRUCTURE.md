@@ -6,7 +6,7 @@ The code is intentionally organized by responsibility rather than framework. The
 SeeIn/
 ├── src/
 │   ├── workflow/
-│   │   ├── orchestrator.ts           # Graph nodes, interrupts, generation, and bounded QA
+│   │   ├── orchestrator.ts           # Graph nodes, interrupts, generation, and autonomous quality supervisor
 │   │   ├── graph-contracts.ts        # Intent, questions, evidence, notes, feedback, checkpoints
 │   │   └── graph-state.ts            # Deterministic edges, progress guide, readiness gate
 │   ├── contracts.ts                  # All validated data exchanged between phases
@@ -18,8 +18,10 @@ SeeIn/
 │   ├── research/reference-collector.ts # Safe, cached reference-image downloads
 │   ├── scene/
 │   │   ├── geometry-bounds.ts        # Parse GLB accessors/node transforms and recipe bounds
+│   │   ├── procedural-geometry.ts    # Shared Three.js geometry builder (backend + browser)
+│   │   ├── procedural-analyzer.ts    # Exact procedural bounds, hierarchy, invariants, budget
 │   │   ├── scene-assembler.ts        # Plan -> manifest + typed refinement patches
-│   │   └── spatial-analyzer.ts       # Measured support, collision, scale, framing facts
+│   │   └── spatial-analyzer.ts       # GLB + procedural target-specific spatial facts
 │   ├── render/screenshot-driver.ts   # Persistent Playwright browser + test capture
 │   ├── storage/
 │   │   ├── artifact-store.ts         # Files, hashes, URLs, and future cloud seam
@@ -33,6 +35,7 @@ SeeIn/
 │   ├── style.css
 │   └── index.html
 ├── tests/                             # Contract, asset, spatial, cache, and workflow tests
+├── examples/procedural-demo.json      # Browser-verifiable declarative construction example
 ├── docs/                              # Architecture and operating decisions
 ├── docker/core.Dockerfile             # Local worker image with Blender/Chromium/Xvfb
 ├── docker-compose.yml                 # Core + ClickHouse 26.3 LTS
@@ -53,6 +56,8 @@ SeeIn/
 | Change asset reuse rules | `src/workflow/orchestrator.ts` and `src/context/clickhouse-store.ts` |
 | Change GLB measurement or recipe bounds | `src/scene/geometry-bounds.ts` |
 | Improve physical/spatial reasoning | `src/scene/spatial-analyzer.ts` |
+| Add or change a procedural geometry kernel | `src/scene/procedural-geometry.ts`, then its schema in `src/contracts.ts` |
+| Change procedural invariants or hierarchy checks | `src/scene/procedural-analyzer.ts` |
 | Change allowed refinement patches | `src/contracts.ts` and `src/scene/scene-assembler.ts` |
 | Change scene behavior or file format | `src/contracts.ts` and `renderer/main.ts` |
 | Add Google Cloud Storage | Implement `ArtifactStore`; do not change the workflow |
@@ -67,6 +72,9 @@ data/projects/<slug>-<id>/
 ├── graph/
 │   ├── state.json                         # latest resumable checkpoint
 │   └── checkpoints/0001-clarify-intent.json
+├── quality/
+│   ├── supervisor.json                    # latest deadline, budget, scores, stall, and recovery cursor
+│   └── checkpoints/attempt-001-inspection-0002.json
 ├── research/
 │   ├── intent.json
 │   ├── agenda.json
@@ -80,7 +88,8 @@ data/projects/<slug>-<id>/
 │   ├── brief.json
 │   ├── notes.md
 │   ├── sources.json
-│   └── references/
+│   ├── references/
+│   └── recovery/attempt-001.json           # targeted research created by visual self-healing
 ├── plan/scene-plan.json
 ├── plan/scene-plan-revision-002.json       # only after asset regeneration
 ├── assets/
@@ -90,11 +99,12 @@ data/projects/<slug>-<id>/
 │   └── reused/revision-001/
 ├── scene/revision-001.json
 ├── qa/
-│   ├── spatial-revision-001.json
-│   └── revision-001.json
-├── renders/revision-001.png
+│   ├── spatial-revision-001-state-<state>-view-<view>.json
+│   ├── revision-001-state-<state>-view-<view>.json
+│   └── coverage-revision-001.json
+├── renders/revision-001-state-<state>-view-<view>.png
 ├── feedback/revision-NNN.json
 └── logs/events.ndjson
 ```
 
-A later scene and render revision exists only when QA produced a real patch. Each generated/reused asset copy lives under its revision so geometry evidence remains attributable and a repair cannot overwrite the prior GLB. A pass does not create a duplicate revision, but every final render has a corresponding `qa/revision-NNN.json` inspection. Feedback files and graph checkpoints make human decisions just as attributable as generated geometry.
+A later scene revision exists only when QA produced a real patch or recovery replan. Every required state/view has a target-specific screenshot, spatial report, scored inspection, and durable supervisor checkpoint. `coverage-revision-NNN.json` is the acceptance ledger; all scored, spatial, and browser gates must pass that same revision. Legacy GLB-only scenes use the unsuffixed filenames. Each generated/reused asset copy lives under its revision so geometry evidence remains attributable and a repair cannot overwrite the prior GLB.

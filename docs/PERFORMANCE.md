@@ -1,6 +1,6 @@
 # Performance and engineering decisions
 
-This document records the speed design and the graph/loop research cross-check as of 2026-08-25.
+This document records the speed design and the graph/loop research cross-check as of 2026-08-29.
 
 ## Critical path
 
@@ -20,7 +20,8 @@ cold prompt
   -> 1 Gemini multimodal inspection
   -> optional patch + cached/fresh rerender
   -> mandatory inspection of that rerender
-  -> repeat only up to WORKFLOW_MAX_ITERATIONS
+  -> repeat while scored quality is below threshold and time/action/API budgets remain
+     -> local patch, or targeted research + partial replan on semantic failure/stall
 
 exact warm prompt
   -> ClickHouse graph/semantic-node cache reads
@@ -46,7 +47,10 @@ The warm path assumes unchanged cache identities and healthy cached files. Every
 | Browser startup | One Playwright browser per backend process; pages are short-lived |
 | Repeat rendering | Content-addressed screenshot cache keyed by scene and renderer contract |
 | Passing QA | No second scene revision and no second render |
-| Refinement bound | 1–4 inspections; default 2 gives one repair and one verification inspection |
+| Refinement bound | 1–128 slots; default 64 gives at most 63 repair actions, with all required targets rechecked after each repair |
+| Long-run wall time | Independent 30-minute default deadline; explicitly scheduled jobs may opt into 240 minutes, completion exits early, and exhaustion remains `quality-blocked` |
+| Semantic self-healing | Low recognizability/domain scores or repeated repair fingerprints trigger targeted research and reconstruction replanning |
+| API control | 240 logical AI calls by default, content-addressed caches, bounded provider retries, and no model call for deterministic gates |
 | Run telemetry | Events buffer briefly and insert as a batch |
 | HTTP project reads | ClickHouse project/latest-scene/event indexes; filesystem is fallback truth |
 
@@ -83,4 +87,4 @@ The local image tracks the [26.3 LTS line](https://clickhouse.com/blog/clickhous
 
 ## Firecrawl decision
 
-Do not put Firecrawl on the default path. Gemini grounding already returns the few sources and images this workflow needs. Add Firecrawl only as an optional cached research adapter for deep site traversal, JavaScript-heavy extraction, or user-specified document collections.
+Use Firecrawl only for the narrow, cached, per-object reference-image lookup that is on the default path. Gemini grounding remains authoritative for claims and citations. Recursive crawling, generic page extraction, and document-collection ingestion stay off the default latency path.

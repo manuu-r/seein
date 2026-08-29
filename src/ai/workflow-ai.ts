@@ -9,12 +9,14 @@ import {
 import { z } from "zod";
 import type { Config } from "../config.js";
 import { boundsSize, recipeBounds } from "../scene/geometry-bounds.js";
+import { validateProceduralReferences } from "../scene/procedural-analyzer.js";
 import {
   InspectionSchema,
   ResearchBriefSchema,
   ScenePlanSchema,
   type Inspection,
   type ResearchBrief,
+  type ReusableProceduralComponent,
   type SceneManifest,
   type ScenePlan,
   type SpatialReport,
@@ -37,12 +39,38 @@ import {
   type UserPreferenceProfile,
 } from "../workflow/graph-contracts.js";
 
+const SURGICAL_ANATOMY_MANDATE = `SeeIn creates evidence-grounded educational 3D anatomy and procedure visualizations for surgeons. Treat every request as a surgical-anatomy communication task, not a generic 3D scene. Preserve anatomical identity, laterality, orientation, topology, attachment, containment, tissue planes, critical neurovascular structures, operative corridors, and procedure-state logic when they are relevant. Never invent anatomy, pathology, an approach, an instrument relationship, or a procedural step that is not supported by the approved request and evidence. The result supports education and communication; it is not patient-specific planning, diagnosis, or clinical advice.`;
+
 /** A downloaded reference image, bound to the object study it depicts. */
 export interface PlannerReferenceImage {
   studyId: string;
   studyName: string;
   mediaType: string;
   data: Buffer;
+}
+
+export interface QaInspectionContext {
+  requestPrompt: string;
+  approvedIntent?: IntentFrame | undefined;
+  researchBrief: ResearchBrief;
+  objectStudies: ResearchDossier["objectStudies"];
+  intentCoverage: ResearchDossier["intentCoverage"];
+  contradictions: ResearchDossier["contradictions"];
+  targetId: string;
+  stateId?: string | undefined;
+  viewId?: string | undefined;
+  targetLabel: string;
+  passedTargetIds: string[];
+  refinement: number;
+}
+
+export interface PlanRecoveryContext {
+  attempt: number;
+  reason: string;
+  targetStudyIds: string[];
+  failedTargetIds: string[];
+  previousPlan: ScenePlan;
+  inspection: Inspection;
 }
 
 export interface WorkflowAI {
@@ -75,12 +103,16 @@ export interface WorkflowAI {
     intent?: IntentFrame,
     dossier?: ResearchDossier,
     referenceImages?: PlannerReferenceImage[],
+    reusableProcedural?: ReusableProceduralComponent[],
+    recovery?: PlanRecoveryContext,
   ): Promise<ScenePlan>;
   inspect(
     manifest: SceneManifest,
     screenshotPath: string,
     spatial?: SpatialReport,
     plan?: ScenePlan,
+    context?: QaInspectionContext,
+    referenceImages?: PlannerReferenceImage[],
   ): Promise<Inspection>;
 }
 
@@ -98,23 +130,25 @@ export class GeminiWorkflowAI implements WorkflowAI {
     if (!config.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is required for AI_DRIVER=gemini");
     this.ai = new GoogleGenAI({ apiKey: config.GEMINI_API_KEY });
     this.identity = `gemini:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_REFERENCE_MODEL}:${config.GEMINI_PLANNER_MODEL}:${config.GEMINI_INSPECTOR_MODEL}`;
-    this.researchIdentity = `gemini-research:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_REFERENCE_MODEL}:v4`;
-    this.planningIdentity = `gemini-planning:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_PLANNER_MODEL}:v2`;
-    this.inspectionIdentity = `gemini-inspection:${config.GEMINI_INSPECTOR_MODEL}:v2`;
-    this.clarificationIdentity = `gemini-clarification:${config.GEMINI_PLANNER_MODEL}:v1`;
-    this.deepResearchIdentity = `gemini-perspective-research:${config.GEMINI_RESEARCH_MODEL}:v3`;
-    this.referenceResearchIdentity = `gemini-reference-research:${config.GEMINI_REFERENCE_MODEL}:v1`;
+    this.researchIdentity = `gemini-research:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_REFERENCE_MODEL}:surgical-anatomy-v5`;
+    this.planningIdentity = `gemini-planning:${config.GEMINI_RESEARCH_MODEL}:${config.GEMINI_PLANNER_MODEL}:surgical-anatomy-self-heal-v3`;
+    this.inspectionIdentity = `gemini-inspection:${config.GEMINI_INSPECTOR_MODEL}:surgical-visual-target-comparison-v4`;
+    this.clarificationIdentity = `gemini-clarification:${config.GEMINI_PLANNER_MODEL}:surgical-anatomy-v2`;
+    this.deepResearchIdentity = `gemini-perspective-research:${config.GEMINI_RESEARCH_MODEL}:surgical-anatomy-v4`;
+    this.referenceResearchIdentity = `gemini-reference-research:${config.GEMINI_REFERENCE_MODEL}:surgical-anatomy-v2`;
   }
 
   async clarify(prompt: string, profile: UserPreferenceProfile): Promise<ClarificationTurn> {
     const result = await this.ai.models.generateContent({
       model: this.config.GEMINI_PLANNER_MODEL,
-      contents: `You lead an interactive 3D visualization project. Before any research or generation, identify the few missing user facts that could materially change the research queries, object list, spatial layout, teaching sequence, or quality criteria.
+      contents: `${SURGICAL_ANATOMY_MANDATE}
 
-Concept: ${prompt}
+You are clarifying a surgeon-facing anatomy visualization before any research or generation. Identify only missing facts that could materially change the anatomy researched, surgical approach, laterality, pathology/variant, structures at risk, operative viewpoint, procedure sequence, spatial construction, or acceptance criteria.
+
+Requested anatomy/procedure: ${prompt}
 Explicit saved preferences: ${JSON.stringify(profile.preferences)}
 
-Ask 1-4 concise, high-information questions. Cover the most consequential uncertainties first. Give a short reason for each question and useful options where they reduce effort, while always allowing free text. Do not ask for facts that can be found through web research. Do not plan assets or a scene yet. Record low-impact defaults as assumptions.`,
+Ask 1-4 concise, high-information questions. Prioritize anatomy region and laterality, procedure or teaching objective, surgical approach/viewpoint, pathology or anatomical variation, and the fidelity needed by the intended surgical audience. Do not ask all of these when the request already answers them. Give a short clinical-visual reason for each question and useful options where they reduce effort, while allowing free text. Do not ask for facts that authoritative research can resolve. Do not plan geometry yet. Never silently assume laterality, a surgical approach, pathology, or a patient-specific condition; surface those as questions or mark them explicitly unspecified.`,
       config: {
         responseMimeType: "application/json",
         responseJsonSchema: toGeminiJsonSchema(ClarificationTurnSchema),
@@ -133,20 +167,22 @@ Ask 1-4 concise, high-information questions. Cover the most consequential uncert
   ): Promise<IntentAndAgenda> {
     const result = await this.ai.models.generateContent({
       model: this.config.GEMINI_PLANNER_MODEL,
-      contents: `Convert this concept and clarification exchange into an explicit visual intent and a three-perspective research agenda. This is research planning only: do not design Blender primitives or place scene objects.
+      contents: `${SURGICAL_ANATOMY_MANDATE}
 
-Concept: ${prompt}
+Convert this anatomy/procedure request and clarification exchange into an explicit surgeon-facing visual intent and a three-perspective research agenda. This is research planning only: do not design Blender primitives or place scene structures.
+
+Requested anatomy/procedure: ${prompt}
 Questions and rationale: ${JSON.stringify(clarification)}
 Answers: ${JSON.stringify(answers)}
 Additional context: ${additionalContext || "None"}
 Explicit saved preferences: ${JSON.stringify(profile.preferences)}
 
 The agenda must contain exactly these perspective IDs:
-- visual-identity: silhouette, canonical views, distinctive features, period/style cues, and failure-prone lookalikes;
-- objects-materials: components, construction, materials, colors, and which objects are essential;
-- scale-space: dimensions, relative scale, contact/support, layout constraints, and useful viewpoints.
+- visual-identity: canonical anatomy, surface and deep landmarks, tissue boundaries, laterality/orientation cues, operative and radiologic views, normal variants, and dangerous lookalikes;
+- objects-materials: required anatomical structures, tissue layers, lesions/implants/instruments only when requested, clinically meaningful visual encoding, transparency/cutaway needs, and structures at risk;
+- scale-space: relative dimensions, branching/topology, attachment, containment, adjacency, neurovascular courses, safe/unsafe corridors, approach geometry, and diagnostic camera viewpoints.
 
-For each perspective, write 2-8 self-questions and search hints whose answers would change asset selection or spatial evaluation. Evaluation criteria must be observable in the final render or measured scene graph.`,
+Make the intent explicit about anatomy region, laterality, procedure/clinical focus, surgical approach, audience, viewing orientation, must-show structures, must-avoid errors, and teaching sequence using the available schema fields. Accuracy should normally be reference-faithful for surgeons unless the user explicitly requests simplification. For each perspective, write 2-8 self-questions and search hints whose answers would change anatomical construction or spatial evaluation. Evaluation criteria must be observable in the rendered views or measurable in the scene graph, including correct identity without labels, laterality, topology, critical relationships, and visibility of the requested operative corridor.`,
       config: {
         responseMimeType: "application/json",
         responseJsonSchema: toGeminiJsonSchema(IntentAndAgendaSchema),
@@ -165,17 +201,19 @@ For each perspective, write 2-8 self-questions and search hints whose answers wo
     // Ground in free text first, then convert that grounded prose into the contract.
     const grounded = await this.ai.models.generateContent({
       model: this.config.GEMINI_RESEARCH_MODEL,
-      contents: `Research one evidence branch for a 3D visualization. Answer the supplied self-questions using grounded web search before drawing conclusions. This branch is research only: do not generate a scene plan or Blender recipe.
+      contents: `${SURGICAL_ANATOMY_MANDATE}
+
+Research one evidence branch for a surgeon-facing anatomy visualization. Answer the supplied self-questions using grounded web search before drawing conclusions. This branch is evidence collection only: do not generate a scene plan or Blender recipe.
 
 Approved intent: ${JSON.stringify(intent)}
 Perspective: ${JSON.stringify(perspective)}
 
 Requirements:
-- Prefer primary, institutional, museum, manufacturer, standards, or technically authoritative sources.
+- Prefer peer-reviewed anatomy or surgical literature, recognized anatomical atlases, radiology references, professional surgical societies, academic medical centers, standards, and device manufacturers for device-specific geometry. Distinguish general anatomy from technique-dependent or disputed claims.
 - Bind every finding to one or more exact source URLs actually returned by search.
-- Describe which views would reveal silhouette, construction, material, scale, or spatial relationships; a separate image-search node collects the actual images.
-- Identify common visual confusions and uncertainty.
-- Return object candidates only when the evidence suggests they are visually or spatially necessary.`,
+- Describe which anatomical, operative, endoscopic, cross-sectional, or radiologic views reveal identity and critical relationships; a separate image-search node collects the actual images.
+- Record laterality, orientation convention, anatomical variation, evidence conflicts, and technique dependence instead of collapsing them into one invented answer.
+- Return candidates only for anatomy, pathology, instruments, implants, landmarks, tissue planes, or contextual structures that are visually or spatially necessary for the approved teaching objective.`,
       config: {
         tools: [{ googleSearch: {} }],
         thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
@@ -189,11 +227,13 @@ Requirements:
       .join("\n");
     const structured = await this.ai.models.generateContent({
       model: this.config.GEMINI_RESEARCH_MODEL,
-      contents: `Convert this grounded research into the required structure. Use only claims that appear in the research below; do not add knowledge of your own.
+      contents: `${SURGICAL_ANATOMY_MANDATE}
+
+Convert this grounded medical research into the required structure. Use only claims that appear in the research below; do not add knowledge of your own. Preserve anatomical terminology, laterality, orientation, variants, approach dependence, and uncertainty exactly enough for a surgeon-facing reconstruction.
 
 Every finding's sourceUrls must be copied verbatim from this list of grounded sources. Do not shorten, rewrite, or invent a URL, and drop any finding you cannot attribute to one of them.
 
-List a question in unansweredQuestions only if it blocks building the scene: it would change which objects exist, their geometry or scale, or how they are positioned relative to each other. Background, technique variation, and detail below the chosen fidelity level are not blocking; leave them out. Return an empty list when the evidence is sufficient to build the scene.
+List a question in unansweredQuestions only if it blocks safe anatomical construction: it would change identity, laterality, topology, variation, approach, which structures exist, their geometry/scale, or their relationship to a critical structure. Preserve clinically meaningful technique variation as a contradiction or question when the approved intent depends on it. Return an empty list only when the evidence is sufficient for the requested fidelity and surgical viewpoint.
 ${groundedSourceList}
 
 Perspective id: ${perspective.id}
@@ -217,7 +257,9 @@ ${grounded.text ?? ""}`,
   async researchReferences(intent: IntentFrame, agenda: ResearchAgenda): Promise<ReferenceDiscovery> {
     const result = await this.ai.models.generateContent({
       model: this.config.GEMINI_REFERENCE_MODEL,
-      contents: `Use Google Image Search to find a small, diverse visual reference set for this approved 3D visualization intent. Search for canonical views, construction details, material close-ups, scale cues, and spatial relationships. Prefer museum, institutional, manufacturer, standards, or technically authoritative source pages. Avoid mood images and AI-generated lookalikes. Do not create a new image; return only a short textual search summary.
+      contents: `${SURGICAL_ANATOMY_MANDATE}
+
+Use Google Image Search to find a small, diverse visual reference set for this approved surgical-anatomy intent. Search for canonical anatomical views, operative exposure, relevant cross-sections or radiology, tissue planes, branching topology, scale cues, and critical spatial relationships. Prefer peer-reviewed figures, recognized atlases, professional societies, academic medical centers, radiology references, and authoritative device sources. Avoid stock/mood imagery, unverified diagrams, mislabeled laterality, and AI-generated anatomy. Do not create a new image; return only a short textual search summary.
 
 Approved intent: ${JSON.stringify(intent)}
 Research agenda: ${JSON.stringify(agenda)}`,
@@ -248,7 +290,9 @@ Research agenda: ${JSON.stringify(agenda)}`,
       .join("\n");
     const result = await this.ai.models.generateContent({
       model: this.config.GEMINI_PLANNER_MODEL,
-      contents: `Synthesize these three grounded research branches into a generation dossier. Do not invent or alter URLs, and do not design primitive geometry yet.
+      contents: `${SURGICAL_ANATOMY_MANDATE}
+
+Synthesize these three grounded research branches into a surgeon-facing anatomical generation dossier. Do not invent or alter URLs, and do not design primitive geometry yet.
 
 Approved intent: ${JSON.stringify(intent)}
 Research branches: ${JSON.stringify(perspectives)}
@@ -256,7 +300,7 @@ Research branches: ${JSON.stringify(perspectives)}
 Every sourceUrls entry must be copied verbatim from this list. Do not shorten, rewrite, or substitute a publisher URL, and give every object study at least one of them:
 ${citableUrls}
 
-Create one object study for each visually necessary object. Each study must explain identifying markers, components, materials, proportions/scale, spatial relationships, source URLs, reference-image URLs, and remaining uncertainty. For every approved intent.mustHave string, create exactly one intentCoverage entry that repeats the requirement verbatim and maps it to existing object-study IDs. Merge duplicates and expose contradictions. A question belongs in unresolvedQuestions only if it blocks generation: it would change which objects exist, their geometry or scale, or how they are positioned relative to each other. Curiosity, historical background, clinical technique variation, and detail that the chosen fidelity level omits are not blocking; leave them out. Return an empty list when the evidence is sufficient to build the scene. The brief should be concise enough for the scene planner but retain concrete visual and spatial evidence.`,
+Create one object study for every required anatomical structure, pathology, instrument, implant, tissue plane, or operative landmark. Each study must explain label-independent identity markers, subcomponents, tissue/material appearance, proportions, branching/topology, attachment/containment/adjacency, laterality and orientation when relevant, source URLs, reference-image URLs, and uncertainty. Explicitly identify structures at risk and relationships that must not be reversed, disconnected, intersected, hidden, or mirrored. For every approved intent.mustHave string, create exactly one intentCoverage entry that repeats the requirement verbatim and maps it to existing object-study IDs. Merge duplicates but expose normal variants, source conflicts, and technique-dependent alternatives. A question belongs in unresolvedQuestions when it blocks accurate construction of identity, topology, laterality, approach, geometry, scale, or critical relationships. Return an empty list only when the evidence supports the requested surgical teaching objective. The brief should be concise enough for planning while retaining concrete anatomical and spatial evidence.`,
       config: {
         responseMimeType: "application/json",
         responseJsonSchema: toGeminiJsonSchema(ResearchDossierDraftSchema),
@@ -270,8 +314,10 @@ Create one object study for each visually necessary object. Each study must expl
   async research(prompt: string): Promise<ResearchBrief> {
     const grounded = await this.ai.models.generateContent({
       model: this.config.GEMINI_RESEARCH_MODEL,
-      contents: `Research this visual scene concept for 3D reconstruction: ${prompt}\n
-Use grounded web search. Focus on recognizable shapes, spatial relationships, scale, materials, lighting, and historically or technically important details. Do not invent URLs. Reference-image discovery is handled by a separate image-search node.`,
+      contents: `${SURGICAL_ANATOMY_MANDATE}
+
+Research this anatomy/procedure request for 3D reconstruction: ${prompt}\n
+Use grounded web search. Focus on label-independent anatomical identity, laterality/orientation, surface and deep landmarks, tissue planes, topology, attachments, containment, neurovascular relationships, relative scale, requested pathology or variation, surgical approach, operative viewpoints, and clinically meaningful visual encoding. Prefer authoritative medical evidence and expose conflicts or technique dependence. Do not invent URLs. Reference-image discovery is handled by a separate image-search node.`,
       config: {
         tools: [{ googleSearch: {} }],
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
@@ -279,7 +325,9 @@ Use grounded web search. Focus on recognizable shapes, spatial relationships, sc
     });
     const structured = await this.ai.models.generateContent({
       model: this.config.GEMINI_RESEARCH_MODEL,
-      contents: `Convert this grounded research into a concise visual brief. Use only claims and URLs that appear below; do not add knowledge of your own and do not invent URLs.
+      contents: `${SURGICAL_ANATOMY_MANDATE}
+
+Convert this grounded medical research into a concise anatomical visual brief. Use only claims and URLs that appear below; do not add knowledge of your own and do not invent URLs. Preserve laterality, orientation, topology, critical relationships, variations, and uncertainty explicitly.
 
 Grounded research:
 ${grounded.text ?? ""}`,
@@ -301,8 +349,12 @@ ${grounded.text ?? ""}`,
     intent?: IntentFrame,
     dossier?: ResearchDossier,
     referenceImages: PlannerReferenceImage[] = [],
+    reusableProcedural: ReusableProceduralComponent[] = [],
+    recovery?: PlanRecoveryContext,
   ): Promise<ScenePlan> {
-    const planPrompt = `Create a compact, deterministic Three.js scene plan for this prompt:\n${prompt}\n
+    const planPrompt = `${SURGICAL_ANATOMY_MANDATE}
+
+Create a compact, deterministic, surgeon-facing Three.js anatomy visualization plan for this request:\n${prompt}\n
 Approved intent:\n${JSON.stringify(intent ?? null)}\n
 Research brief:\n${JSON.stringify(research)}\n
 Approved object studies and intent coverage:\n${JSON.stringify(dossier ? {
@@ -310,23 +362,57 @@ Approved object studies and intent coverage:\n${JSON.stringify(dossier ? {
   intentCoverage: dossier.intentCoverage,
   contradictions: dossier.contradictions,
 } : null)}\n
+Reusable procedural components retrieved from prior revisions:
+${JSON.stringify(reusableProcedural.map((component) => ({
+  componentKey: component.componentKey,
+  node: component.node,
+  material: component.material,
+  landmarks: component.landmarks,
+})))}\n
+${recovery ? `Self-healing revision request:
+Attempt: ${recovery.attempt}
+Reason: ${recovery.reason}
+Affected object studies: ${JSON.stringify(recovery.targetStudyIds)}
+Failed state/view targets: ${JSON.stringify(recovery.failedTargetIds)}
+Previous inspection: ${JSON.stringify(recovery.inspection)}
+Previous plan: ${JSON.stringify(recovery.previousPlan)}
+
+Preserve correct entities and IDs. Change only the construction, assets, materials, views, or states needed to resolve the evidenced failure. Do not merely restate the previous plan.` : ""}
+
 Constraints:
-- Use at most ${maxObjects} scene objects and at most ${maxObjects} asset specs.
-- Each missing asset must be expressible using 1-16 bounded Blender primitives.
-- Dimensions, positions, and scales are in meters.
+- Anatomical fidelity outranks decoration. Do not add generic platforms, markers, furniture, scenery, or contextual props unless the approved intent explicitly requires them.
+- Preserve laterality and use a documented anatomical/operative orientation. Never mirror anatomy implicitly. Include orientation cues in labels or view names when ambiguity is possible.
+- Model every critical structure and relationship required by the approved intent. A label, color, glow, or highlight cannot substitute for missing or unrecognizable geometry.
+- Use tissue-appropriate, distinguishable materials and restrained transparency/cutaways to expose deep relationships without making anatomy unreadable. Do not rely on color alone to distinguish adjacent structures.
+- Use shared landmarks and invariants for branches, lumens, attachments, containment, safe corridors, and structure-at-risk proximity. Do not allow vessels, nerves, ducts, or tissue layers to terminate, intersect, float, or pass through anatomy without evidence.
+- Required views should include an orientation overview plus the operative or diagnostic views needed to verify the requested teaching point. Add cross-sectional, endoscopic, or approach-aligned views when supported by the intent.
+- Procedure states must show meaningful anatomical exposure or instrument/structure changes in evidence-supported order. Do not invent a maneuver. Alternatives and complications are included only when requested or grounded.
+- Author a declarative procedural program whenever the concept contains connected paths, layered structures, repeated forms, cutaways, flows, or state-dependent construction. The backend owns this program; never return JavaScript.
+- Use imported Blender assets only for isolated shapes that the procedural kernels cannot express. Use at most ${maxObjects} imported objects and ${maxObjects} asset specs; an all-procedural plan may use zero.
+- Each imported asset must be expressible using 1-16 bounded Blender primitives.
+- Imported dimensions, positions, scales, camera coordinates, and light positions are in meters. Procedural coordinates use coordinateFrame.units and are converted with metersPerUnit.
 - Use radians for rotations.
-- Keep every object near the origin and resting on or intentionally attached to something.
-- Create labels for meaningful objects.
-- Prefer recognizable silhouettes over detail.
+- Keep every structure near the origin and anatomically attached, contained, adjacent, or intentionally isolated according to evidence.
+- Create labels for meaningful anatomy and operative landmarks. Use labelPosition when automatic placement would obscure, overlap, or misidentify a feature.
+- Prefer connected, measurable construction over decorative detail. Use shared landmarks for any endpoints that must remain connected across states or revisions.
+- Give procedural nodes explicit dependency links, meaningful layers, deterministic segment counts, a realistic triangle budget, and at least two required diagnostic views when the subject benefits from more than one angle.
+- Encode measurable continuity, contact, containment, distance, and required-view visibility as invariants. Do not claim an invariant that cannot be evaluated from the returned geometry.
+- For a procedure or process, create an overview-to-focus state graph. visibleNodes/highlightedNodes control procedural construction while visibleObjects/highlightedObjects control imported GLBs. State mutations may deterministically override an entity's local transform or opacity; values are absolute in that entity's declared coordinate frame, not deltas. Use them for actual construction steps rather than pretending that highlight alone is a procedural change. Bind each state to a cameraViewId where useful.
+- Mark transitions as normal, alternative, or complication. Give non-normal branches a concise condition and description so the construction graph preserves clinically or mechanically meaningful alternatives.
+- A tube path point must have either a literal position or a landmarkId. Parent and child tubes should bind their junction endpoints to the same landmark instead of copying coordinates.
+- Every procedural node.studyId and every imported asset ID must map to an approved object study when a dossier exists.
+- Reuse a retrieved procedural component only when its name, tags, geometry, and material agree with current evidence. You may copy and retarget it, but the returned program must include every referenced material and landmark. Never force a mismatch merely to reuse cached work.
+- Prefer recognizable anatomy, correct topology, depth cues, and tissue/material response over excessive polygon count.
 - Use one ambient or hemisphere light and one directional or point light.
 - IDs must use lowercase ASCII letters, digits, hyphens, or underscores and start with a letter.
 - Each object must reference an asset spec ID that exists in the same response.
 - When an approved dossier is present, every asset ID must equal an object-study ID. Do not introduce unresearched decorative assets.
 ${referenceImages.length > 0 ? `
-Reference images follow this text. Each is labelled with the object study it depicts.
-Read proportions, component layout, and characteristic silhouette from the images and
-make the primitives match what you see. Where an image and the written study disagree,
-trust the image for shape and proportion, and the study for naming and relationships.` : ""}`;
+Reference images follow this text. Each is labelled with the anatomical study it depicts.
+Use them to compare silhouette, topology, branching, tissue planes, component layout,
+operative exposure, and proportions. Images are evidence, not an excuse to copy a single
+view blindly. When references disagree, preserve the contradiction and follow the approved
+dossier; never choose an anatomical variant or laterality silently.` : ""}`;
     const result = await this.ai.models.generateContent({
       model: this.config.GEMINI_PLANNER_MODEL,
       contents: [
@@ -335,7 +421,7 @@ trust the image for shape and proportion, and the study for naming and relations
           parts: [
             { text: planPrompt },
             ...referenceImages.flatMap((image) => [
-              { text: `Reference image for object study "${image.studyId}" (${image.studyName}):` },
+              { text: `Anatomical reference image for study "${image.studyId}" (${image.studyName}):` },
               { inlineData: { data: image.data.toString("base64"), mimeType: image.mediaType } },
             ]),
           ],
@@ -355,8 +441,36 @@ trust the image for shape and proportion, and the study for naming and relations
     screenshotPath: string,
     spatial?: SpatialReport,
     plan?: ScenePlan,
+    context?: QaInspectionContext,
+    referenceImages: PlannerReferenceImage[] = [],
   ): Promise<Inspection> {
     const image = await fs.readFile(screenshotPath);
+    const target = context
+      ? {
+          targetId: context.targetId,
+          stateId: context.stateId,
+          viewId: context.viewId,
+          targetLabel: context.targetLabel,
+          passedTargetIds: context.passedTargetIds,
+          refinement: context.refinement,
+        }
+      : { targetId: "default", targetLabel: "default view" };
+    const acceptanceBrief = {
+      originalRequest: context?.requestPrompt ?? manifest.title,
+      approvedIntent: context?.approvedIntent ?? null,
+      research: context
+        ? {
+            concept: context.researchBrief.concept,
+            summary: context.researchBrief.summary,
+            visualNotes: context.researchBrief.visualNotes,
+            objectNotes: context.researchBrief.objectNotes,
+            styleKeywords: context.researchBrief.styleKeywords,
+          }
+        : null,
+      objectStudies: context?.objectStudies ?? [],
+      intentCoverage: context?.intentCoverage ?? [],
+      contradictions: context?.contradictions ?? [],
+    };
     const result = await this.ai.models.generateContent({
       model: this.config.GEMINI_INSPECTOR_MODEL,
       contents: [
@@ -364,9 +478,25 @@ trust the image for shape and proportion, and the study for naming and relations
           role: "user",
           parts: [
             {
-              text: `Inspect this rendered scene against its manifest, asset recipes, and measured spatial evidence. The spatial bounds were parsed from the exact GLB hashes shown in the evidence and are authoritative for bounds, framing, floating, and intersection; use the image for visual fidelity and semantic judgment. Choose at most one obvious, high-impact issue. If one asset's silhouette or construction is clearly wrong, use asset-regenerate to replace only that asset's bounded 1-16 primitive recipe. Return pass/none when no safe correction is justified. Only request a patch allowed by the response schema. Manifest: ${JSON.stringify(manifest)} Asset plan: ${JSON.stringify(plan?.assets ?? [])} Spatial evidence: ${JSON.stringify(spatial ?? null)}`,
+              text: `${SURGICAL_ANATOMY_MANDATE}
+
+You are the visual quality controller for a surgeon-facing Three.js anatomy visualization. This is not a generic aesthetics review. Compare the rendered screenshot pixel-by-pixel and semantically against the approved acceptance brief below. The original request and approved intent define what the visualization must communicate; grounded anatomical studies define recognizable identity, landmarks, tissue planes, proportions, topology, laterality, orientation, relationships, and material encoding. Do not reward a polished render that depicts the wrong anatomy, mirrors laterality, hides a critical structure, invents a procedure step, or relies on labels/color to compensate for missing geometry.
+
+Approved acceptance brief: ${JSON.stringify(acceptanceBrief)}
+Screenshot target: ${JSON.stringify(target)}
+
+Inspect the rendered visualization against that brief, its manifest, construction program, asset recipes, approved visual references, and measured spatial evidence. Judge only what is actually visible in this exact state/view. Explicitly verify label-independent anatomical recognizability; correct laterality and viewing orientation; topology, branching, attachment, containment, and adjacency; tissue-plane and depth readability; structures at risk; operative-corridor visibility; instrument/implant relationships when requested; and whether the intended surgical teaching point is visible. GLB bounds come from exact accessors; procedural bounds and invariant results come from the exact parameters interpreted by Three.js. Those measurements are authoritative for bounds, continuity, contact, containment, framing, floating, and intersection; use the rendered screenshot for silhouette, visible topology, occlusion, depth ordering, tissue/material response, legibility, and semantic judgment.
+
+Return a scored assessment on every inspection. recognizabilityScore asks whether a surgeon can identify the anatomy and operative orientation without relying on labels. domainFidelityScore asks whether landmarks, laterality, topology, relative scale, tissue planes, critical relationships, and procedural logic agree with approved evidence. visualQualityScore covers depth ordering, occlusion management, tissue/material differentiation, lighting, label legibility, and operative-view composition. constructionCompletenessScore asks whether every applicable must-show structure, structure at risk, evaluation criterion, procedure state, branch, and required view is actually present. A pass requires scores of at least ${this.config.WORKFLOW_MIN_RECOGNIZABILITY}, ${this.config.WORKFLOW_MIN_DOMAIN_FIDELITY}, ${this.config.WORKFLOW_MIN_VISUAL_QUALITY}, and ${this.config.WORKFLOW_MIN_CONSTRUCTION_COMPLETENESS} respectively, no required spatial error, and high-confidence visual evidence. Labels, color, or highlights cannot compensate for unrecognizable or missing anatomy. The issue and evidence fields must name the most consequential gap between the observed pixels and the approved acceptance brief.
+
+Choose the highest-value correction that moves the observed render toward the approved surgical target. Use direct-fix only for a truly local camera, occlusion, lighting, transform, label, single-structure geometry, or shared-landmark issue with a causally relevant patch. Use targeted-research when anatomical identity, variation, laterality, approach, proportions, topology, or a critical relationship is uncertain or contradicted. Use partial-replan when the anatomical construction, operative viewpoint, or teaching sequence is wrong. For targeted-research or partial-replan, return patch.kind none and provide targetStudyIds plus concrete medical research questions. If an imported structure is locally wrong, use asset-regenerate. If procedural anatomy is locally wrong, replace exactly one node with procedural-node or move one shared anatomical landmark with procedural-landmark; preserve IDs, dependencies, studyId, and intentional shared landmarks. Return pass/none only when the rendered screenshot matches the approved target and every scored gate passes. patch.kind must be exactly one of camera, light, object-transform, label, asset-regenerate, procedural-node, procedural-landmark, none. Manifest: ${JSON.stringify(manifest)} Asset plan: ${JSON.stringify(plan?.assets ?? [])} Spatial evidence: ${JSON.stringify(spatial ?? null)}`,
             },
+            { text: "Rendered scene screenshot — this is the candidate output to assess and correct:" },
             { inlineData: { data: image.toString("base64"), mimeType: "image/png" } },
+            ...referenceImages.slice(0, 4).flatMap((reference) => [
+              { text: `Approved anatomical reference for study "${reference.studyId}" (${reference.studyName}); compare identity, laterality, topology, tissue planes, and relationships against it, but do not mistake it for the rendered visualization:` },
+              { inlineData: { data: reference.data.toString("base64"), mimeType: reference.mediaType } },
+            ]),
           ],
         },
       ],
@@ -376,47 +506,47 @@ trust the image for shape and proportion, and the study for naming and relations
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
-    return InspectionSchema.parse(parseJsonResponse(result.text));
+    return InspectionSchema.parse(normalizeInspection(parseJsonResponse(result.text)));
   }
 }
 
 export class DeterministicWorkflowAI implements WorkflowAI {
-  readonly identity = "deterministic:v1";
-  readonly researchIdentity = "deterministic-research:v1";
-  readonly planningIdentity = "deterministic-planning:v1";
-  readonly inspectionIdentity = "deterministic-inspection:v1";
-  readonly clarificationIdentity = "deterministic-clarification:v1";
-  readonly deepResearchIdentity = "deterministic-perspective-research:v1";
-  readonly referenceResearchIdentity = "deterministic-reference-research:v1";
+  readonly identity = "deterministic:surgical-anatomy-v2";
+  readonly researchIdentity = "deterministic-research:surgical-anatomy-v2";
+  readonly planningIdentity = "deterministic-planning:surgical-anatomy-v2";
+  readonly inspectionIdentity = "deterministic-inspection:surgical-anatomy-v2";
+  readonly clarificationIdentity = "deterministic-clarification:surgical-anatomy-v2";
+  readonly deepResearchIdentity = "deterministic-perspective-research:surgical-anatomy-v2";
+  readonly referenceResearchIdentity = "deterministic-reference-research:surgical-anatomy-v2";
 
   async clarify(prompt: string, _profile: UserPreferenceProfile): Promise<ClarificationTurn> {
     return ClarificationTurnSchema.parse({
-      summary: `Before researching ${prompt}, I need to pin down how the visualization should teach the idea and how faithful it must be.`,
+      summary: `Before researching ${prompt}, I need to pin down the surgical teaching target, operative viewpoint, and required anatomical fidelity.`,
       uncertainties: [
-        "The intended audience and explanation depth are unknown.",
-        "The desired balance between reference fidelity and stylization is unknown.",
+        "The procedure, surgical audience, and intended teaching decision may be underspecified.",
+        "Laterality, operative orientation, anatomy variant, and required fidelity may be unknown.",
       ],
       questions: [
         {
           id: "audience-purpose",
           dimension: "audience",
-          question: "Who is this visualization for, and what should they understand after exploring it?",
-          reason: "This changes both the object emphasis and the step-by-step teaching sequence.",
-          options: ["General audience", "Student", "Domain expert"],
+          question: "Which surgical audience and teaching objective should this visualization serve?",
+          reason: "This changes the structures at risk, operative exposure, labels, and procedure-state sequence.",
+          options: ["Surgical trainee orientation", "Procedure rehearsal explanation", "Consultant-level anatomy review"],
           allowFreeText: true,
           required: true,
         },
         {
           id: "accuracy-style",
           dimension: "accuracy",
-          question: "Should the scene prioritize reference fidelity, plausible simplification, or a strongly stylized look?",
-          reason: "This determines the research threshold and which assets are compatible.",
-          options: ["Reference-faithful", "Plausible simplification", "Strongly stylized"],
+          question: "What laterality, surgical approach/viewpoint, and fidelity should be treated as authoritative?",
+          reason: "These choices control orientation, topology, critical relationships, and the acceptable degree of simplification.",
+          options: ["Reference-faithful operative anatomy", "Reference-faithful orientation with simplified tissue detail", "Anatomy overview only"],
           allowFreeText: true,
           required: true,
         },
       ],
-      assumptions: ["The result should remain compact enough for an interactive browser scene."],
+      assumptions: ["The result is an educational surgeon-facing visualization, not patient-specific planning or clinical advice."],
     });
   }
 
@@ -431,54 +561,54 @@ export class DeterministicWorkflowAI implements WorkflowAI {
     return IntentAndAgendaSchema.parse({
       intent: {
         subject: prompt,
-        purpose: answerText || "Explain the concept through a compact interactive scene.",
-        audience: answers[0]?.answer ?? "General audience",
+        purpose: answerText || "Explain surgically relevant anatomy through a compact interactive visualization.",
+        audience: answers[0]?.answer ?? "Surgeons and surgical trainees",
         accuracy: /faithful/i.test(answerText) ? "reference-faithful" : /stylized/i.test(answerText) ? "stylized" : "plausible",
-        style: profile.preferences.find((preference) => preference.key === "visual-style")?.value ?? "Clear low-poly educational visualization",
-        composition: "An overview-first composition with a central subject and visible supporting context.",
-        mustHave: ["main subject", "supporting context", "scale cue"],
-        mustAvoid: ["unresearched decorative objects", "ambiguous silhouettes"],
-        interactionGoal: "Start with an overview, then highlight the main subject and its important relationships.",
+        style: profile.preferences.find((preference) => preference.key === "visual-style")?.value ?? "Clear layered surgical-anatomy visualization",
+        composition: "An orientation-first anatomical composition followed by an operative focus on critical relationships.",
+        mustHave: ["target anatomy", "surrounding anatomical context", "orientation and laterality cue"],
+        mustAvoid: ["invented anatomy", "ambiguous laterality", "decorative non-medical objects"],
+        interactionGoal: "Start with anatomical orientation, then reveal the target and structures at risk from the operative viewpoint.",
         constraints: ["Browser-renderable", "Reusable GLB assets", ...(additionalContext ? [additionalContext] : [])],
         assumptions: ["A compact scene communicates the concept better than a crowded reconstruction."],
         evaluationCriteria: [
-          "The main subject is recognizable from silhouette and labeled parts.",
-          "Relative scale and support relationships are spatially plausible.",
-          "The state sequence moves from overview to focused explanation.",
+          "The target anatomy is recognizable without relying on labels.",
+          "Laterality, topology, and critical anatomical relationships are spatially plausible.",
+          "The state sequence moves from orientation overview to operative focus.",
         ],
       },
       agenda: {
-        rationale: "Research identity, construction, and spatial evidence independently before scene planning.",
+        rationale: "Research anatomical identity, required structures, and operative spatial evidence independently before construction.",
         perspectives: [
           {
             id: "visual-identity",
             label: "Visual identity",
-            objective: "Establish canonical silhouette and distinguishing features.",
-            questions: ["Which features make the subject recognizable?", "Which lookalikes are commonly confused with it?"],
-            searchHints: [`${prompt} canonical view`, `${prompt} visual identification`],
-            requiredEvidence: ["Canonical view", "Distinctive silhouette markers"],
+            objective: "Establish canonical anatomy, landmarks, laterality, and operative orientation.",
+            questions: ["Which landmarks make this anatomy recognizable?", "Which variants or adjacent structures are commonly confused?"],
+            searchHints: [`${prompt} surgical anatomy landmarks`, `${prompt} operative view laterality`],
+            requiredEvidence: ["Canonical anatomical view", "Distinctive landmarks and orientation cues"],
           },
           {
             id: "objects-materials",
-            label: "Objects and materials",
-            objective: "Identify essential components, construction, and materials.",
-            questions: ["Which components are structurally essential?", "Which materials and colors are characteristic?"],
-            searchHints: [`${prompt} parts materials`, `${prompt} construction details`],
-            requiredEvidence: ["Component breakdown", "Material evidence"],
+            label: "Structures and tissue planes",
+            objective: "Identify required anatomy, tissue layers, structures at risk, and clinically useful visual encoding.",
+            questions: ["Which structures and tissue planes are essential?", "Which structures at risk must remain visible?"],
+            searchHints: [`${prompt} tissue planes structures at risk`, `${prompt} operative anatomy`],
+            requiredEvidence: ["Anatomical structure breakdown", "Tissue-plane and risk-structure evidence"],
           },
           {
             id: "scale-space",
-            label: "Scale and spatial relationships",
-            objective: "Ground dimensions, support, relative scale, and useful viewpoints.",
-            questions: ["What dimensions or ratios matter?", "What supports, contains, or sits beside each object?"],
-            searchHints: [`${prompt} dimensions`, `${prompt} spatial layout`],
-            requiredEvidence: ["Scale cue", "Support/contact relationships"],
+            label: "Operative spatial relationships",
+            objective: "Ground topology, attachment, containment, adjacency, relative scale, and useful operative viewpoints.",
+            questions: ["Which dimensions or ratios matter?", "What attaches to, contains, crosses, or lies at risk beside each structure?"],
+            searchHints: [`${prompt} anatomical relationships`, `${prompt} surgical approach view`],
+            requiredEvidence: ["Relative scale", "Attachment, containment, and critical adjacency"],
           },
         ],
         completionCriteria: [
-          "Every important object has identifying references.",
-          "Object construction and materials are documented.",
-          "Scale and spatial relationships are supported by sources.",
+          "Every required anatomical structure has identifying references.",
+          "Tissue planes, landmarks, and structures at risk are documented.",
+          "Laterality, topology, scale, and operative relationships are supported by sources.",
         ],
       },
       notes: ["Deterministic fixture keeps research branches independently cacheable."],
@@ -498,26 +628,26 @@ export class DeterministicWorkflowAI implements WorkflowAI {
       summary: `${perspective.label} evidence for ${intent.subject}.`,
       findings: [
         {
-          claim: `${intent.subject} needs a clear primary silhouette in the ${perspective.label.toLowerCase()} view.`,
-          whyItMatters: "The asset and camera must preserve the concept's identifying form.",
+          claim: `${intent.subject} needs recognizable anatomical landmarks in the ${perspective.label.toLowerCase()} view.`,
+          whyItMatters: "The geometry and operative camera must preserve anatomical identity and orientation.",
           sourceUrls: [sourceUrl],
           confidence: "high",
         },
         {
-          claim: "A visible support and scale cue prevents the object from reading as an arbitrary floating icon.",
-          whyItMatters: "The final scene needs measurable contact and relative scale.",
+          claim: "Surrounding tissue context and an orientation cue prevent the target anatomy from reading as an isolated, laterality-ambiguous icon.",
+          whyItMatters: "The final visualization needs measurable attachment, relative scale, and orientation.",
           sourceUrls: [secondSourceUrl],
           confidence: "medium",
         },
       ],
       objectCandidates: [
         {
-          name: "Central subject",
-          role: "Carries the main visual concept.",
-          identifyingFeatures: ["Strong central mass", "Distinctive upper feature"],
-          likelyMaterials: ["Context-appropriate primary material"],
-          scaleNotes: ["Large enough to dominate the supporting platform"],
-          spatialNotes: ["Rests on the central platform and is read before the context marker"],
+          name: "Target anatomy",
+          role: "Carries the primary surgical teaching target.",
+          identifyingFeatures: ["Recognizable primary contour", "Distinctive anatomical landmark"],
+          likelyMaterials: ["Tissue-appropriate primary material"],
+          scaleNotes: ["Dominant enough to read within surrounding anatomy"],
+          spatialNotes: ["Attached to surrounding tissue context and oriented by the laterality marker"],
         },
       ],
       sources: [
@@ -544,9 +674,9 @@ export class DeterministicWorkflowAI implements WorkflowAI {
     return ResearchDossierDraftSchema.parse({
       brief: {
         concept: intent.subject,
-        summary: `A source-grounded, overview-first visualization of ${intent.subject}.`,
-        visualNotes: ["Preserve the primary silhouette.", "Show support and relative scale.", "Use the requested teaching order."],
-        objectNotes: ["Central subject", "Supporting platform", "Contextual scale marker"],
+        summary: `A source-grounded, orientation-first surgical anatomy visualization of ${intent.subject}.`,
+        visualNotes: ["Preserve anatomical identity and laterality.", "Show attachment and relative scale.", "Use the requested operative teaching order."],
+        objectNotes: ["Target anatomy", "Surrounding tissue plane", "Orientation and laterality marker"],
         styleKeywords: [intent.style, intent.accuracy],
         sources: sources.slice(0, 12),
         references: references.slice(0, 8),
@@ -554,42 +684,42 @@ export class DeterministicWorkflowAI implements WorkflowAI {
       objectStudies: [
         {
           id: "subject",
-          name: "Central subject",
-          role: "Carries the main visual concept and receives the focus state.",
-          identityMarkers: ["Strong central mass", "Distinctive upper feature"],
-          components: ["Primary body", "Upper identifying feature"],
-          materials: ["Context-appropriate primary material"],
-          proportionAndScale: ["Dominates the support but leaves visible negative space"],
-          spatialRelationships: ["Rests on the platform and sits beside a context marker"],
+          name: "Target anatomy",
+          role: "Carries the surgical teaching target and receives the operative focus state.",
+          identityMarkers: ["Recognizable primary contour", "Distinctive anatomical landmark"],
+          components: ["Primary anatomical body", "Identifying landmark"],
+          materials: ["Tissue-appropriate primary material"],
+          proportionAndScale: ["Dominates the focus while surrounding anatomy remains readable"],
+          spatialRelationships: ["Attaches to the surrounding tissue plane and is oriented by the laterality marker"],
           sourceUrls: sources.slice(0, 3).map((source) => source.url),
           referenceImageUrls: references.slice(0, 3).map((reference) => reference.imageUrl),
-          uncertainty: "Fine surface detail is intentionally omitted in the fixture.",
+          uncertainty: "Fine tissue detail is intentionally omitted in the deterministic fixture.",
         },
         {
           id: "platform",
-          name: "Supporting platform",
-          role: "Makes contact and support explicit instead of leaving the subject floating.",
-          identityMarkers: ["Broad low base", "Visible perimeter around the subject"],
-          components: ["Single stable base"],
-          materials: ["Dark matte support material"],
-          proportionAndScale: ["Wider than the central subject on both horizontal axes"],
-          spatialRelationships: ["Supports the subject at the origin"],
+          name: "Surrounding tissue plane",
+          role: "Makes anatomical attachment explicit instead of leaving the target floating.",
+          identityMarkers: ["Broad contextual tissue layer", "Visible perimeter around the target"],
+          components: ["Single simplified tissue plane"],
+          materials: ["Muted tissue-context material"],
+          proportionAndScale: ["Wider than the target anatomy on both horizontal axes"],
+          spatialRelationships: ["Supports and contextualizes the target anatomy at the origin"],
           sourceUrls: sources.slice(2, 4).map((source) => source.url),
           referenceImageUrls: references.slice(1, 2).map((reference) => reference.imageUrl),
-          uncertainty: "The platform is an explanatory support rather than a literal reconstruction detail.",
+          uncertainty: "The tissue plane is a simplified educational context rather than patient-specific anatomy.",
         },
         {
           id: "marker",
-          name: "Contextual scale marker",
-          role: "Provides an immediate relative-scale and spatial cue.",
-          identityMarkers: ["Slender vertical form", "Contrasting cool color"],
-          components: ["Single vertical post"],
-          materials: ["Simple colored marker material"],
-          proportionAndScale: ["Narrower than the subject and similar in visible height"],
-          spatialRelationships: ["Stands beside the subject without intersecting it"],
+          name: "Orientation and laterality marker",
+          role: "Provides an immediate orientation and relative-scale cue.",
+          identityMarkers: ["Slender directional form", "Contrasting orientation color"],
+          components: ["Single directional marker"],
+          materials: ["Simple orientation-marker material"],
+          proportionAndScale: ["Narrower than the target anatomy and similar in visible height"],
+          spatialRelationships: ["Sits beside the target without intersecting anatomy"],
           sourceUrls: sources.slice(4, 6).map((source) => source.url),
           referenceImageUrls: references.slice(2, 3).map((reference) => reference.imageUrl),
-          uncertainty: "The marker is a pedagogical scale cue.",
+          uncertainty: "The marker is a pedagogical orientation cue, not anatomy.",
         },
       ],
       intentCoverage: intent.mustHave.map((requirement, index) => ({
@@ -605,14 +735,14 @@ export class DeterministicWorkflowAI implements WorkflowAI {
   async research(prompt: string): Promise<ResearchBrief> {
     return {
       concept: prompt,
-      summary: `A compact, stylized visualization of ${prompt}.`,
+      summary: `A compact, orientation-first surgical anatomy visualization of ${prompt}.`,
       visualNotes: [
-        "Use simple recognizable silhouettes.",
-        "Keep the main subject centered with clear negative space.",
-        "Use warm key lighting and a cooler ambient fill.",
+        "Use simple but label-independent recognizable anatomy.",
+        "Keep target and surrounding structures readable from the operative view.",
+        "Preserve orientation, laterality cues, attachment, and relative scale.",
       ],
-      objectNotes: ["A raised central subject", "A supporting platform", "A contextual marker"],
-      styleKeywords: ["stylized", "low-poly", "educational"],
+      objectNotes: ["Target anatomy", "Surrounding tissue plane", "Orientation and laterality marker"],
+      styleKeywords: ["surgical-anatomy", "layered", "educational"],
       sources: [],
       references: [],
     };
@@ -624,10 +754,13 @@ export class DeterministicWorkflowAI implements WorkflowAI {
     maxObjects: number,
     _intent?: IntentFrame,
     _dossier?: ResearchDossier,
+    _referenceImages?: PlannerReferenceImage[],
+    _reusableProcedural?: ReusableProceduralComponent[],
+    _recovery?: PlanRecoveryContext,
   ): Promise<ScenePlan> {
     const plan: ScenePlan = {
       title: prompt,
-      rationale: "A deterministic three-object composition for offline workflow verification.",
+      rationale: "A deterministic three-structure surgical-anatomy fixture for offline workflow verification.",
       environment: { background: "#111827", groundColor: "#334155", groundSize: 20 },
       camera: { position: [7, 5, 8], target: [0, 1, 0], fov: 45 },
       lights: [
@@ -637,35 +770,35 @@ export class DeterministicWorkflowAI implements WorkflowAI {
       assets: [
         {
           id: "subject",
-          name: "Central subject",
-          category: "subject",
-          description: `Stylized central representation of ${prompt}`,
-          tags: ["subject", "stylized", "reusable"],
+          name: "Target anatomy",
+          category: "anatomy",
+          description: `Simplified target-anatomy placeholder for ${prompt}`,
+          tags: ["anatomy", "target", "educational", "reusable"],
           dimensions: [2, 2.4, 2],
           style: "low-poly",
           parts: [
-            { name: "body", primitive: "box", size: [1.5, 1.6, 1.5], position: [0, 0.8, 0], rotation: [0, 0, 0], color: "#f59e0b", bevel: 0.08 },
-            { name: "top", primitive: "sphere", size: [1.1, 1.1, 1.1], position: [0, 1.9, 0], rotation: [0, 0, 0], color: "#fbbf24", bevel: 0 },
+            { name: "body", primitive: "box", size: [1.5, 1.6, 1.5], position: [0, 0.8, 0], rotation: [0, 0, 0], color: "#c96f7b", bevel: 0.08 },
+            { name: "landmark", primitive: "sphere", size: [1.1, 1.1, 1.1], position: [0, 1.9, 0], rotation: [0, 0, 0], color: "#e6a0a9", bevel: 0 },
           ],
         },
         {
           id: "platform",
-          name: "Platform",
-          category: "support",
-          description: "A low support platform",
-          tags: ["platform", "support", "reusable"],
+          name: "Surrounding tissue plane",
+          category: "support-tissue",
+          description: "A simplified surrounding tissue plane that makes anatomical attachment explicit",
+          tags: ["tissue", "support", "anatomical-context", "reusable"],
           dimensions: [4, 0.4, 4],
           style: "low-poly",
           parts: [
-            { name: "base", primitive: "cylinder", size: [4, 0.4, 4], position: [0, 0.2, 0], rotation: [0, 0, 0], color: "#475569", bevel: 0.04 },
+            { name: "tissue-plane", primitive: "cylinder", size: [4, 0.4, 4], position: [0, 0.2, 0], rotation: [0, 0, 0], color: "#72545f", bevel: 0.04 },
           ],
         },
         {
           id: "marker",
-          name: "Context marker",
-          category: "marker",
-          description: "A slim contextual marker",
-          tags: ["marker", "context", "reusable"],
+          name: "Orientation marker",
+          category: "orientation-marker",
+          description: "A slim orientation and laterality marker",
+          tags: ["marker", "orientation", "laterality", "reusable"],
           dimensions: [0.3, 2, 0.3],
           style: "low-poly",
           parts: [
@@ -674,19 +807,37 @@ export class DeterministicWorkflowAI implements WorkflowAI {
         },
       ],
       objects: [
-        { id: "platform", assetSpecId: "platform", position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1], label: "Foundation", highlight: false },
-        { id: "subject", assetSpecId: "subject", position: [0, 0.4, 0], rotation: [0, 0, 0], scale: [1, 1, 1], label: "Main concept", highlight: true },
-        { id: "marker", assetSpecId: "marker", position: [2.6, 0, -0.5], rotation: [0, 0, 0], scale: [1, 1, 1], label: "Context", highlight: false },
+        { id: "platform", assetSpecId: "platform", position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1], label: "Surrounding tissue", highlight: false },
+        { id: "subject", assetSpecId: "subject", position: [0, 0.4, 0], rotation: [0, 0, 0], scale: [1, 1, 1], label: "Target anatomy", highlight: true },
+        { id: "marker", assetSpecId: "marker", position: [2.6, 0, -0.5], rotation: [0, 0, 0], scale: [1, 1, 1], label: "Orientation", highlight: false },
       ],
       relationships: [
-        { from: "subject", to: "platform", type: "on", description: "The subject rests on the platform." },
-        { from: "marker", to: "subject", type: "beside", description: "The marker provides context." },
+        { from: "subject", to: "platform", type: "on", description: "The target anatomy is attached to the simplified surrounding tissue plane." },
+        { from: "marker", to: "subject", type: "beside", description: "The marker provides orientation and laterality context." },
       ],
       states: [
-        { id: "overview", label: "Overview", visibleObjects: ["platform", "subject", "marker"], highlightedObjects: [] },
-        { id: "focus", label: "Focus", visibleObjects: ["platform", "subject", "marker"], highlightedObjects: ["subject"] },
+        {
+          id: "overview",
+          label: "Anatomical orientation",
+          objective: "Establish anatomy, orientation, and relative scale.",
+          visibleObjects: ["platform", "subject", "marker"],
+          highlightedObjects: [],
+          visibleNodes: [],
+          highlightedNodes: [],
+          mutations: [],
+        },
+        {
+          id: "focus",
+          label: "Operative focus",
+          objective: "Focus attention on the target anatomy and its critical relationship.",
+          visibleObjects: ["platform", "subject", "marker"],
+          highlightedObjects: ["subject"],
+          visibleNodes: [],
+          highlightedNodes: [],
+          mutations: [],
+        },
       ],
-      transitions: [{ from: "overview", to: "focus", durationMs: 600 }],
+      transitions: [{ from: "overview", to: "focus", durationMs: 600, kind: "normal", description: "Move from anatomical orientation to the operative target." }],
     };
     return validatePlan(plan, maxObjects);
   }
@@ -696,24 +847,60 @@ export class DeterministicWorkflowAI implements WorkflowAI {
     _screenshotPath: string,
     _spatial?: SpatialReport,
     _plan?: ScenePlan,
+    _context?: QaInspectionContext,
+    _referenceImages?: PlannerReferenceImage[],
   ): Promise<Inspection> {
     if (manifest.revision > 1) {
       return {
         verdict: "pass",
         category: "none",
         issue: "",
-        evidence: "The deterministic correction was rerendered and reinspected.",
+        evidence: "The deterministic anatomy correction was rerendered and reinspected from the required operative view.",
         patch: { kind: "none" },
+        assessment: passingAssessment("The corrected deterministic scene satisfies the fixture."),
       };
     }
     return {
       verdict: "fix",
       category: "framing",
-      issue: "The deterministic inspection requests one reproducible camera refinement.",
-      evidence: "Offline verification fixture.",
+      issue: "The deterministic anatomy inspection requests one reproducible operative-camera refinement.",
+      evidence: "Offline surgical-visualization verification fixture.",
       patch: { kind: "camera", position: [6.5, 4.8, 7.5], target: [0, 1.1, 0] },
+      assessment: failingAssessment("The initial framing needs a local correction."),
     };
   }
+}
+
+function passingAssessment(rationale: string) {
+  return {
+    recognizabilityScore: 1,
+    domainFidelityScore: 1,
+    visualQualityScore: 1,
+    constructionCompletenessScore: 1,
+    confidence: 1,
+    failedCriteria: [],
+    strengths: ["Deterministic fixture requirements are satisfied."],
+    recommendedAction: "pass" as const,
+    targetStudyIds: [],
+    researchQuestions: [],
+    rationale,
+  };
+}
+
+function failingAssessment(rationale: string) {
+  return {
+    recognizabilityScore: 0.7,
+    domainFidelityScore: 0.8,
+    visualQualityScore: 0.55,
+    constructionCompletenessScore: 0.9,
+    confidence: 1,
+    failedCriteria: ["The current target does not meet the visual-quality gate."],
+    strengths: ["The required construction is present."],
+    recommendedAction: "direct-fix" as const,
+    targetStudyIds: [],
+    researchQuestions: [],
+    rationale,
+  };
 }
 
 function mergeGrounding(brief: ResearchBrief, chunks: GroundingChunk[]): ResearchBrief {
@@ -765,6 +952,9 @@ function groundedImageReferences(chunks: GroundingChunk[]) {
   );
 }
 
+// Mirrors ResearchPerspectiveResultSchema.findings.min(2).
+const MIN_GROUNDED_FINDINGS = 2;
+
 function mergePerspectiveGrounding(
   result: ResearchPerspectiveResult,
   chunks: GroundingChunk[],
@@ -800,13 +990,21 @@ function mergePerspectiveGrounding(
     ).slice(0, 5),
   }));
   if (groundedSources.length === 0) throw new Error(`Research perspective ${expectedId} returned no grounded web sources`);
-  if (findings.some((finding) => finding.sourceUrls.length === 0)) {
-    throw new Error(`Research perspective ${expectedId} contained a finding without a matching grounded source URL`);
+  // An unattributable claim carries no evidentiary weight, so it is dropped rather
+  // than kept or allowed to kill the branch. The extraction step has to copy opaque
+  // redirect URIs verbatim and occasionally rewrites one; losing that single claim
+  // is the proportionate response. MIN_GROUNDED_FINDINGS matches the schema floor,
+  // below which the branch genuinely has too little evidence to be worth keeping.
+  const attributed = findings.filter((finding) => finding.sourceUrls.length > 0);
+  if (attributed.length < MIN_GROUNDED_FINDINGS) {
+    throw new Error(
+      `Research perspective ${expectedId} produced ${attributed.length} of ${findings.length} findings with a grounded source URL, below the ${MIN_GROUNDED_FINDINGS} required`,
+    );
   }
   return ResearchPerspectiveResultSchema.parse({
     ...result,
     perspectiveId: expectedId,
-    findings,
+    findings: attributed,
     sources: groundedSources.slice(0, 12),
     references: groundedReferences.slice(0, 8),
   });
@@ -895,6 +1093,25 @@ function toGeminiJsonSchema(schema: z.ZodType): Record<string, unknown> {
 function sanitizeForGemini(node: unknown): unknown {
   if (Array.isArray(node)) return node.map(sanitizeForGemini);
   if (!node || typeof node !== "object") return node;
+  // Gemini also rejects a request once a schema carries enough prefixItems tuples.
+  // Every Vec3 compiles to one, so a scene plan with a procedural program crosses the
+  // limit. Collapse homogeneous tuples to a plain typed array and state the arity in
+  // the description; Zod re-enforces the real tuple length when parsing the response.
+  const tuple = (node as Record<string, unknown>).prefixItems;
+  if (Array.isArray(tuple) && tuple.length > 0) {
+    const kinds = new Set(tuple.map((entry) => (entry as Record<string, unknown> | null)?.type));
+    if (kinds.size === 1) {
+      const { prefixItems, items, minItems: tupleMin, maxItems: tupleMax, description, ...keep } =
+        node as Record<string, unknown>;
+      const arity = `Provide exactly ${tuple.length} items.`;
+      return {
+        ...Object.fromEntries(Object.entries(keep).map(([key, value]) => [key, sanitizeForGemini(value)])),
+        type: "array",
+        items: { type: [...kinds][0] },
+        description: typeof description === "string" ? `${description} ${arity}` : arity,
+      };
+    }
+  }
   const { minItems, maxItems, ...rest } = node as Record<string, unknown>;
   const sanitized: Record<string, unknown> = Object.fromEntries(
     Object.entries(rest).map(([key, value]) => [key, sanitizeForGemini(value)]),
@@ -914,6 +1131,40 @@ function describeItemBound(minItems: unknown, maxItems: unknown): string {
   if (min !== undefined) return `Provide at least ${min} items.`;
   if (max !== undefined) return `Provide at most ${max} items.`;
   return "";
+}
+
+// The category and patch.kind vocabularies overlap in meaning but not in spelling
+// ("lighting" vs "light"), and the model reliably copies the category across. Only
+// the discriminator is canonicalised; the branch's own fields still have to fit, so
+// a genuinely malformed patch continues to fail loudly.
+const QA_PATCH_KIND_ALIASES: Record<string, string> = {
+  lighting: "light",
+  lights: "light",
+  framing: "camera",
+  "camera-framing": "camera",
+  transform: "object-transform",
+  "object-transforms": "object-transform",
+  scale: "object-transform",
+  labels: "label",
+  regenerate: "asset-regenerate",
+  "asset-regen": "asset-regenerate",
+  "asset-load": "asset-regenerate",
+  geometry: "asset-regenerate",
+  noop: "none",
+  "no-op": "none",
+  pass: "none",
+};
+
+function normalizeInspection(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const inspection = value as Record<string, unknown>;
+  const patch = inspection.patch;
+  if (!patch || typeof patch !== "object") return value;
+  const kind = (patch as Record<string, unknown>).kind;
+  if (typeof kind !== "string") return value;
+  const canonical = QA_PATCH_KIND_ALIASES[kind.trim().toLowerCase()];
+  if (!canonical) return value;
+  return { ...inspection, patch: { ...(patch as Record<string, unknown>), kind: canonical } };
 }
 
 function parseJsonResponse(text: string | undefined): unknown {
@@ -936,8 +1187,18 @@ function validatePlan(plan: ScenePlan, maxObjects: number): ScenePlan {
   if (normalized.objects.length > maxObjects || normalized.assets.length > maxObjects) {
     throw new Error(`Scene plan exceeds configured maximum of ${maxObjects} objects/assets`);
   }
+  if (normalized.objects.length === 0 && !normalized.procedural) {
+    throw new Error("Scene plan must contain imported objects, a procedural program, or both");
+  }
+  if (normalized.procedural) validateProceduralReferences(normalized.procedural);
   const assetIds = new Set(normalized.assets.map((asset) => asset.id));
-  const objectIds = new Set(normalized.objects.map((object) => object.id));
+  const objectIds = new Set([
+    ...normalized.objects.map((object) => object.id),
+    ...(normalized.procedural?.nodes.map((node) => node.id) ?? []),
+  ]);
+  if (objectIds.size !== normalized.objects.length + (normalized.procedural?.nodes.length ?? 0)) {
+    throw new Error("Imported objects and procedural nodes must have unique scene-wide IDs");
+  }
   for (const object of normalized.objects) {
     if (!assetIds.has(object.assetSpecId)) {
       throw new Error(`Object ${object.id} references missing asset spec ${object.assetSpecId}`);
@@ -946,6 +1207,32 @@ function validatePlan(plan: ScenePlan, maxObjects: number): ScenePlan {
   for (const relation of normalized.relationships) {
     if (!objectIds.has(relation.from) || !objectIds.has(relation.to)) {
       throw new Error(`Relationship references missing object: ${relation.from} -> ${relation.to}`);
+    }
+  }
+  const viewIds = new Set(normalized.procedural?.views.map((view) => view.id) ?? []);
+  const stateIds = new Set(normalized.states.map((state) => state.id));
+  if (stateIds.size !== normalized.states.length) throw new Error("Scene states must have unique IDs");
+  for (const state of normalized.states) {
+    for (const id of [...state.visibleObjects, ...state.highlightedObjects, ...state.visibleNodes, ...state.highlightedNodes]) {
+      if (!objectIds.has(id)) throw new Error(`State ${state.id} references missing scene entity ${id}`);
+    }
+    if (state.cameraViewId && !viewIds.has(state.cameraViewId)) {
+      throw new Error(`State ${state.id} references missing camera view ${state.cameraViewId}`);
+    }
+    const mutated = new Set<string>();
+    for (const mutation of state.mutations) {
+      if (!objectIds.has(mutation.entityId)) {
+        throw new Error(`State ${state.id} mutates missing scene entity ${mutation.entityId}`);
+      }
+      if (mutated.has(mutation.entityId)) {
+        throw new Error(`State ${state.id} contains duplicate mutations for ${mutation.entityId}`);
+      }
+      mutated.add(mutation.entityId);
+    }
+  }
+  for (const transition of normalized.transitions) {
+    if (!stateIds.has(transition.from) || !stateIds.has(transition.to)) {
+      throw new Error(`Transition references a missing state: ${transition.from} -> ${transition.to}`);
     }
   }
   return normalized;

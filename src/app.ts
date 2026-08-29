@@ -59,5 +59,6 @@ export async function createAppServices(config: Config, overrides: AppOverrides 
     blender,
     screenshots,
   );
+  if (config.WORKFLOW_AUTO_RESUME_INTERRUPTED) await orchestrator.recoverInterruptedRuns();
   return { config, context, projects, orchestrator };
 }

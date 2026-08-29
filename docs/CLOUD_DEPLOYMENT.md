@@ -83,7 +83,7 @@ The current worker image explicitly targets `linux/amd64`. Confirm that the sele
 ## Reliability and security gates
 
 - Treat Cloud Run Job retries as duplicate delivery; all writes must be idempotent by run/revision key.
-- Keep the 1–4 inspection-iteration bound and object/reference limits in server configuration.
+- Keep the 1–128 correction bound, configurable runtime deadline, logical AI-call and targeted-research budgets, state/view target bound, and object/reference limits in server configuration. Use a four-hour deadline only for a deliberately scheduled unattended job.
 - Use signed URLs with short expiry or API proxying; never expose ClickHouse or Gemini credentials to the renderer.
 - Retain event rows and final manifests longer than transient screenshots or downloaded references.
 - Emit structured logs with `project_id`, `run_id`, stage, and revision but never prompts or secrets by default in production telemetry.

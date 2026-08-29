@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { InspectionSchema, ResearchBriefSchema, SourceSchema, ReferenceCandidateSchema } from "../contracts.js";
+import { InspectionSchema, QaCoverageSchema, QualitySupervisorStateSchema, ResearchBriefSchema, SourceSchema, ReferenceCandidateSchema } from "../contracts.js";
 
 const IdSchema = z.string().regex(/^[a-z][a-z0-9_-]*$/);
 
@@ -235,6 +235,7 @@ export const GraphNodeIdSchema = z.enum([
   "await-research-approval",
   "generate-scene",
   "visual-qa",
+  "quality-blocked",
   "await-feedback",
   "completed",
   "failed",
@@ -261,7 +262,7 @@ export const WorkflowGraphStateSchema = z.object({
   sequence: z.number().int().nonnegative(),
   currentNode: GraphNodeIdSchema,
   status: z.enum(["running", "waiting", "completed", "failed"]),
-  waitingFor: z.enum(["clarification", "research-approval", "feedback"]).optional(),
+  waitingFor: z.enum(["clarification", "research-approval", "quality-review", "feedback"]).optional(),
   failedNode: GraphNodeIdSchema.optional(),
   failureMessage: z.string().max(8000).optional(),
   resumeCount: z.number().int().min(0).default(0),
@@ -278,6 +279,8 @@ export const WorkflowGraphStateSchema = z.object({
   steps: z.array(GuideStepSchema),
   finalSceneRevision: z.number().int().positive().optional(),
   finalInspection: InspectionSchema.optional(),
+  qaCoverage: QaCoverageSchema.optional(),
+  qualitySupervisor: QualitySupervisorStateSchema.optional(),
   qaExhausted: z.boolean().optional(),
   nextProjectId: z.string().optional(),
   createdAt: z.iso.datetime(),
@@ -306,10 +309,16 @@ export const PreferenceInputSchema = UserPreferenceSchema.pick({ key: true, valu
 export const UserFeedbackRequestSchema = z.object({
   decision: z.enum(["accept", "revise-scene", "revise-intent"]),
   categories: z.array(z.enum([
+    "anatomy",
+    "laterality",
     "identity",
     "missing-part",
+    "critical-structure",
+    "surgical-approach",
+    "procedure-step",
     "scale",
     "layout",
+    "occlusion",
     "lighting",
     "label",
     "teaching-order",

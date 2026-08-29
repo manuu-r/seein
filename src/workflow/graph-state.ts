@@ -25,7 +25,8 @@ const ALLOWED_EDGES: Record<GraphNodeId, GraphNodeId[]> = {
   "synthesize-research": ["await-research-approval", "plan-research", "failed"],
   "await-research-approval": ["generate-scene", "plan-research", "failed"],
   "generate-scene": ["visual-qa", "failed"],
-  "visual-qa": ["await-feedback", "failed"],
+  "visual-qa": ["await-feedback", "quality-blocked", "failed"],
+  "quality-blocked": ["generate-scene", "failed"],
   "await-feedback": ["completed", "clarify-intent", "failed"],
   completed: [],
   failed: [],
@@ -45,6 +46,7 @@ const NODE_STAGE: Record<GraphNodeId, ResumeStage | null> = {
   "await-research-approval": null,
   "generate-scene": "generation",
   "visual-qa": "generation",
+  "quality-blocked": "generation",
   "await-feedback": null,
   completed: null,
   failed: null,
@@ -95,14 +97,15 @@ export function rewindGraphState(
 }
 
 const GUIDE_STEPS: Array<{ id: GraphNodeId; label: string }> = [
-  { id: "clarify-intent", label: "Clarify what the visualization must communicate" },
-  { id: "plan-research", label: "Plan the evidence search" },
-  { id: "research-perspectives", label: "Research form, objects, and spatial facts" },
-  { id: "synthesize-research", label: "Audit references and generation readiness" },
-  { id: "generate-scene", label: "Reuse or build measured 3D assets" },
-  { id: "visual-qa", label: "Render, inspect, and refine" },
-  { id: "await-feedback", label: "Learn from your feedback" },
-  { id: "completed", label: "Accepted visualization" },
+  { id: "clarify-intent", label: "Define anatomy, approach, and surgical teaching goal" },
+  { id: "plan-research", label: "Plan the medical evidence search" },
+  { id: "research-perspectives", label: "Research anatomy, tissue planes, and spatial relationships" },
+  { id: "synthesize-research", label: "Audit sources and anatomical readiness" },
+  { id: "generate-scene", label: "Reuse or build measured anatomical structures" },
+  { id: "visual-qa", label: "Render operative views, inspect, and correct" },
+  { id: "quality-blocked", label: "Resolve remaining anatomical quality gates" },
+  { id: "await-feedback", label: "Capture the surgeon’s review" },
+  { id: "completed", label: "Accepted surgical anatomy visualization" },
 ];
 
 const NODE_TO_STEP = new Map<GraphNodeId, GraphNodeId>([
@@ -115,6 +118,7 @@ const NODE_TO_STEP = new Map<GraphNodeId, GraphNodeId>([
   ["await-research-approval", "synthesize-research"],
   ["generate-scene", "generate-scene"],
   ["visual-qa", "visual-qa"],
+  ["quality-blocked", "quality-blocked"],
   ["await-feedback", "await-feedback"],
   ["completed", "completed"],
   ["failed", "completed"],
@@ -135,7 +139,7 @@ export function createInitialGraphState(
     sequence: 0,
     currentNode: "intake",
     status: "running",
-    guidance: "I am turning the concept into a precise visual brief before spending time on research or 3D generation.",
+    guidance: "I am turning the anatomy or procedure request into a precise surgeon-facing visual brief before starting medical research or 3D construction.",
     clarificationRound: 0,
     researchRound: 0,
     answers: [],
@@ -259,28 +263,28 @@ export function evaluateResearchReadiness(
     },
     {
       id: "object-coverage",
-      label: "Candidate objects have construction studies",
+      label: "Required anatomical structures have construction studies",
       passed: auditedDraft.objectStudies.length > 0 && detailedStudies.length === auditedDraft.objectStudies.length,
-      evidence: `${detailedStudies.length}/${auditedDraft.objectStudies.length} object studies include identity, components, materials, scale, space, and sources.`,
+      evidence: `${detailedStudies.length}/${auditedDraft.objectStudies.length} anatomical studies include identity markers, components, tissue/material encoding, scale, relationships, and sources.`,
     },
     {
       id: "reference-coverage",
-      label: "Important objects have visual references",
+      label: "Required structures have visual references",
       passed: referencedStudies.length === auditedDraft.objectStudies.length,
-      evidence: `${referencedStudies.length}/${auditedDraft.objectStudies.length} object studies link at least one image reference.`,
+      evidence: `${referencedStudies.length}/${auditedDraft.objectStudies.length} anatomical studies link at least one image reference.`,
     },
     {
       id: "provenance",
-      label: "Object evidence resolves to retrieved sources",
+      label: "Anatomical evidence resolves to retrieved sources",
       passed: boundStudies.length === auditedDraft.objectStudies.length,
       evidence: `${boundStudies.length}/${auditedDraft.objectStudies.length} studies use only retrieved source and image URLs.`,
     },
     {
       id: "intent-coverage",
-      label: "The dossier covers the requested visual intent",
+      label: "The dossier covers the surgical teaching intent",
       passed: intent.evaluationCriteria.length > 0 && intent.mustHave.length > 0 && missingRequirements.length === 0,
       evidence: missingRequirements.length === 0
-        ? `${intent.mustHave.length}/${intent.mustHave.length} must-have requirements map to existing object studies.`
+        ? `${intent.mustHave.length}/${intent.mustHave.length} must-show requirements map to researched anatomical structures.`
         : `Missing explicit study coverage for: ${missingRequirements.join(", ")}.`,
     },
     {

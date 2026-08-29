@@ -8,6 +8,7 @@ import {
 } from "../contracts.js";
 import { slugify } from "../lib/strings.js";
 import { boundsSize, recipeBounds } from "./geometry-bounds.js";
+import { validateProceduralReferences } from "./procedural-analyzer.js";
 
 export function assembleScene(
   projectId: string,
@@ -15,6 +16,7 @@ export function assembleScene(
   assets: Map<string, ResolvedAsset>,
   revision = 1,
 ): SceneManifest {
+  if (plan.procedural) validateProceduralReferences(plan.procedural);
   const objects = plan.objects.map((object) => {
     const asset = assets.get(object.assetSpecId);
     if (!asset) throw new Error(`No resolved asset for ${object.assetSpecId}`);
@@ -40,6 +42,7 @@ export function assembleScene(
     camera: plan.camera,
     lights: plan.lights,
     objects,
+    ...(plan.procedural ? { procedural: plan.procedural } : {}),
     relationships: plan.relationships,
     states: plan.states,
     transitions: plan.transitions,
@@ -66,20 +69,43 @@ export function applyQaPatch(manifest: SceneManifest, patch: QaPatch): SceneMani
     }
     case "object-transform": {
       const object = next.objects.find((candidate) => candidate.id === patch.objectId);
-      if (!object) throw new Error(`QA patch references missing object ${patch.objectId}`);
-      if (patch.position) object.position = patch.position;
-      if (patch.rotation) object.rotation = patch.rotation;
-      if (patch.scale) object.scale = patch.scale;
+      const node = next.procedural?.nodes.find((candidate) => candidate.id === patch.objectId);
+      if (!object && !node) throw new Error(`QA patch references missing object or procedural node ${patch.objectId}`);
+      const target = object ?? node!;
+      if (patch.position) target.position = patch.position;
+      if (patch.rotation) target.rotation = patch.rotation;
+      if (patch.scale) target.scale = patch.scale;
+      if (next.procedural) validateProceduralReferences(next.procedural);
       break;
     }
     case "label": {
       const object = next.objects.find((candidate) => candidate.id === patch.objectId);
-      if (!object) throw new Error(`QA patch references missing object ${patch.objectId}`);
-      object.labelVisible = patch.visible;
+      const node = next.procedural?.nodes.find((candidate) => candidate.id === patch.objectId);
+      if (!object && !node) throw new Error(`QA patch references missing object or procedural node ${patch.objectId}`);
+      (object ?? node!).labelVisible = patch.visible;
       break;
     }
     case "asset-regenerate":
       throw new Error("Asset regeneration must be applied to the scene plan and resolved GLB set");
+    case "procedural-node": {
+      if (!next.procedural) throw new Error("QA patch requires a procedural scene program");
+      if (patch.node.id !== patch.nodeId) {
+        throw new Error(`Procedural replacement ID ${patch.node.id} does not match target ${patch.nodeId}`);
+      }
+      const index = next.procedural.nodes.findIndex((candidate) => candidate.id === patch.nodeId);
+      if (index < 0) throw new Error(`QA patch references missing procedural node ${patch.nodeId}`);
+      next.procedural.nodes[index] = patch.node;
+      validateProceduralReferences(next.procedural);
+      break;
+    }
+    case "procedural-landmark": {
+      if (!next.procedural) throw new Error("QA patch requires a procedural scene program");
+      const landmark = next.procedural.landmarks.find((candidate) => candidate.id === patch.landmarkId);
+      if (!landmark) throw new Error(`QA patch references missing procedural landmark ${patch.landmarkId}`);
+      landmark.position = patch.position;
+      validateProceduralReferences(next.procedural);
+      break;
+    }
     case "none":
       break;
   }

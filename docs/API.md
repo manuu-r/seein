@@ -8,7 +8,7 @@ The API is asynchronous and interruptible. Creating a project returns `202` afte
 POST /api/projects
 content-type: application/json
 
-{"prompt":"A compact medieval blacksmith workshop","userId":"local-user"}
+{"prompt":"Right hepatic hilum anatomy for laparoscopic cholecystectomy with structures at risk","userId":"local-user"}
 ```
 
 The response includes `projectId`, `statusUrl`, `eventsUrl`, `interactionUrl`, and `viewerUrl`.
@@ -21,6 +21,8 @@ GET /api/projects/:projectId/interaction
 
 The response contains the project, latest checkpointed graph `state`, and `sceneUrl`. Poll this endpoint while the state is `running`. Stop and render the appropriate form when it is `waiting`.
 
+During autonomous generation, ordered `/events` entries expose each target's scored assessment, quality-gate reasons, recovery action, and stall decision. When the graph reaches `quality-blocked`, `state.qualitySupervisor` contains the deadline, repair/inspection/research/replan counts, logical AI usage, and best scores; `state.qaCoverage` identifies the unresolved state/view targets.
+
 ## Resume clarification
 
 ```http
@@ -29,7 +31,7 @@ content-type: application/json
 
 {
   "answers":[
-    {"questionId":"audience-purpose","answer":"Museum visitors; explain how the tools work together."},
+    {"questionId":"audience-purpose","answer":"Hepatobiliary surgery trainees; orient Calot’s triangle and the structures at risk before dissection."},
     {"questionId":"accuracy-style","answer":"Reference-faithful silhouettes with simplified materials."}
   ],
   "additionalContext":"Begin with an overview."
@@ -75,7 +77,7 @@ GET /api/projects/:projectId/scene/latest
 GET /api/projects/:projectId/view
 ```
 
-`scene/latest` returns `404` until an assembled revision exists. `view` opens the generic renderer in guided-project mode; direct screenshot rendering still passes an immutable manifest URL.
+`scene/latest` returns `404` until an assembled revision exists. `view` opens the display-only surgical anatomy renderer in guided-project mode; direct screenshot rendering still passes an immutable manifest URL.
 
 ## Rerun
 
@@ -84,6 +86,18 @@ POST /api/projects/:projectId/rerun
 ```
 
 Rerunning creates a linked project and run for the same user. Research branches, plans, assets, clean renders, and inspections remain globally reusable through ClickHouse and content-addressed artifact storage.
+
+## Resume autonomous quality work
+
+```http
+GET /api/projects/:projectId/checkpoints
+POST /api/projects/:projectId/resume
+content-type: application/json
+
+{"fresh":false}
+```
+
+Resume restarts the owning graph stage. A process restart inside an active quality window reuses its stored deadline and counters; an explicit resume after time/action/API exhaustion opens a new supervised window while preserving cached research, assets, scene revisions, and the quality ledger. Set `fresh:true` only when a provider/model/cache identity must be bypassed deliberately.
 
 ## Failure contract
 

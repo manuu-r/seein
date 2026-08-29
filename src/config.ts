@@ -6,6 +6,11 @@ const BooleanString = z
   .default("true")
   .transform((value) => value === "true");
 
+const AutoResumeString = z
+  .enum(["true", "false"])
+  .default("true")
+  .transform((value) => value === "true");
+
 const ConfigSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   HOST: z.string().default("0.0.0.0"),
@@ -45,7 +50,24 @@ const ConfigSchema = z.object({
   REFERENCE_MAX_COUNT: z.coerce.number().int().min(0).max(64).default(48),
   REFERENCE_MAX_BYTES: z.coerce.number().int().min(1024).default(8_000_000),
   WORKFLOW_MAX_OBJECTS: z.coerce.number().int().min(1).max(12).default(8),
-  WORKFLOW_MAX_ITERATIONS: z.coerce.number().int().min(1).max(4).default(2),
+  // Long-running autonomous quality supervision is constrained by both wall time
+  // and action/API budgets. Passing state/view targets do not consume actions.
+  WORKFLOW_MAX_ITERATIONS: z.coerce.number().int().min(1).max(128).default(64),
+  // A normal local run should finish quickly. Longer unattended sessions are an
+  // explicit run-policy choice (for example 240 minutes), not the default.
+  WORKFLOW_MAX_RUNTIME_MINUTES: z.coerce.number().int().min(1).max(360).default(30),
+  WORKFLOW_MAX_LOGICAL_AI_CALLS: z.coerce.number().int().min(4).max(1000).default(240),
+  WORKFLOW_MAX_TARGETED_RESEARCH_ROUNDS: z.coerce.number().int().min(0).max(24).default(8),
+  WORKFLOW_STALL_WINDOW: z.coerce.number().int().min(2).max(12).default(3),
+  WORKFLOW_MIN_QUALITY_DELTA: z.coerce.number().min(0).max(0.25).default(0.015),
+  WORKFLOW_MIN_RECOGNIZABILITY: z.coerce.number().min(0).max(1).default(0.82),
+  WORKFLOW_MIN_DOMAIN_FIDELITY: z.coerce.number().min(0).max(1).default(0.78),
+  WORKFLOW_MIN_VISUAL_QUALITY: z.coerce.number().min(0).max(1).default(0.72),
+  WORKFLOW_MIN_CONSTRUCTION_COMPLETENESS: z.coerce.number().min(0).max(1).default(0.9),
+  WORKFLOW_PROVIDER_RETRIES: z.coerce.number().int().min(1).max(8).default(4),
+  WORKFLOW_RETRY_BASE_MS: z.coerce.number().int().min(0).max(30_000).default(1000),
+  WORKFLOW_AUTO_RESUME_INTERRUPTED: AutoResumeString,
+  WORKFLOW_MAX_QA_TARGETS: z.coerce.number().int().min(1).max(48).default(24),
   WORKFLOW_MAX_RESEARCH_ROUNDS: z.coerce.number().int().min(1).max(3).default(2),
 });
 

@@ -2,12 +2,15 @@ import type {
   AssetSpec,
   Inspection,
   ProjectRecord,
+  QualitySupervisorState,
   ResearchBrief,
+  ReusableProceduralComponent,
   ResolvedAsset,
   RunEvent,
   SceneManifest,
   SpatialReport,
 } from "../contracts.js";
+import { hashObject } from "../lib/hash.js";
 import type { UserPreferenceProfile, WorkflowGraphState } from "../workflow/graph-contracts.js";
 
 export interface AssetRecord {
@@ -38,6 +41,7 @@ export interface ContextStore {
   storeResearch(key: string, prompt: string, brief: ResearchBrief): Promise<void>;
   findCachedStep(key: string): Promise<unknown | null>;
   storeCachedStep(key: string, kind: string, payload: unknown): Promise<void>;
+  findProceduralComponents(queryTerms: string[], limit?: number): Promise<ReusableProceduralComponent[]>;
   findAssets(requests: AssetLookupRequest[], relatedLimit?: number): Promise<Map<string, AssetCandidates>>;
   storeAssets(records: AssetRecord[]): Promise<void>;
   findLatestScene(projectId: string): Promise<SceneManifest | null>;
@@ -51,6 +55,8 @@ export interface ContextStore {
   ): Promise<void>;
   storeQa(projectId: string, revision: number, inspection: Inspection): Promise<void>;
   storeSpatial(projectId: string, revision: number, report: SpatialReport): Promise<void>;
+  findQualitySupervisorState(projectId: string): Promise<QualitySupervisorState | null>;
+  storeQualitySupervisorState(state: QualitySupervisorState): Promise<void>;
   findGraphState(projectId: string): Promise<WorkflowGraphState | null>;
   storeGraphState(state: WorkflowGraphState): Promise<void>;
   findUserPreferenceProfile(userId: string): Promise<UserPreferenceProfile | null>;
@@ -60,6 +66,7 @@ export interface ContextStore {
 export class MemoryContextStore implements ContextStore {
   readonly research = new Map<string, ResearchBrief>();
   readonly cache = new Map<string, unknown>();
+  readonly proceduralComponents = new Map<string, ReusableProceduralComponent>();
   readonly assets = new Map<string, AssetRecord>();
   readonly events: RunEvent[] = [];
   readonly projects = new Map<string, ProjectRecord>();
@@ -67,6 +74,7 @@ export class MemoryContextStore implements ContextStore {
   readonly renders: Array<{ projectId: string; revision: number; path: string }> = [];
   readonly reports: Array<{ projectId: string; revision: number; inspection: Inspection }> = [];
   readonly spatial: Array<{ projectId: string; revision: number; report: SpatialReport }> = [];
+  readonly qualitySupervisorStates = new Map<string, QualitySupervisorState>();
   readonly graphStates = new Map<string, WorkflowGraphState>();
   readonly userPreferences = new Map<string, UserPreferenceProfile>();
 
@@ -111,6 +119,19 @@ export class MemoryContextStore implements ContextStore {
     this.cache.set(key, structuredClone(payload));
   }
 
+  async findProceduralComponents(queryTerms: string[], limit = 12): Promise<ReusableProceduralComponent[]> {
+    const wanted = new Set(queryTerms.flatMap(tokenize));
+    return [...this.proceduralComponents.values()]
+      .map((component) => {
+        const available = new Set(tokenize(`${component.node.studyId} ${component.node.name} ${component.node.tags.join(" ")}`));
+        return { component, score: [...wanted].filter((term) => available.has(term)).length };
+      })
+      .filter(({ score }) => score > 0)
+      .sort((left, right) => right.score - left.score || right.component.createdAt.localeCompare(left.component.createdAt))
+      .slice(0, limit)
+      .map(({ component }) => structuredClone(component));
+  }
+
   async findAssets(requests: AssetLookupRequest[], relatedLimit = 5): Promise<Map<string, AssetCandidates>> {
     const result = new Map<string, AssetCandidates>();
     for (const request of requests) {
@@ -149,6 +170,27 @@ export class MemoryContextStore implements ContextStore {
 
   async storeScene(projectId: string, manifest: SceneManifest): Promise<void> {
     this.scenes.push({ projectId, manifest });
+    if (manifest.procedural) {
+      const materials = new Map(manifest.procedural.materials.map((material) => [material.id, material]));
+      const landmarks = new Map(manifest.procedural.landmarks.map((landmark) => [landmark.id, landmark]));
+      for (const node of manifest.procedural.nodes) {
+        const material = materials.get(node.materialId);
+        if (!material) continue;
+        const usedLandmarks = node.kind === "tube"
+          ? node.points.flatMap((point) => point.landmarkId && landmarks.has(point.landmarkId) ? [landmarks.get(point.landmarkId)!] : [])
+          : [];
+        const componentKey = hashObject({ node, material, landmarks: usedLandmarks });
+        this.proceduralComponents.set(componentKey, {
+          componentKey,
+          node: structuredClone(node),
+          material: structuredClone(material),
+          landmarks: structuredClone(usedLandmarks),
+          sourceProjectId: projectId,
+          sourceRevision: manifest.revision,
+          createdAt: manifest.generatedAt,
+        });
+      }
+    }
   }
 
   async storeRender(projectId: string, revision: number, path: string): Promise<void> {
@@ -161,6 +203,14 @@ export class MemoryContextStore implements ContextStore {
 
   async storeSpatial(projectId: string, revision: number, report: SpatialReport): Promise<void> {
     this.spatial.push({ projectId, revision, report });
+  }
+
+  async findQualitySupervisorState(projectId: string): Promise<QualitySupervisorState | null> {
+    return structuredClone(this.qualitySupervisorStates.get(projectId) ?? null);
+  }
+
+  async storeQualitySupervisorState(state: QualitySupervisorState): Promise<void> {
+    this.qualitySupervisorStates.set(state.projectId, structuredClone(state));
   }
 
   async findGraphState(projectId: string): Promise<WorkflowGraphState | null> {
@@ -178,4 +228,8 @@ export class MemoryContextStore implements ContextStore {
   async storeUserPreferenceProfile(profile: UserPreferenceProfile): Promise<void> {
     this.userPreferences.set(profile.userId, structuredClone(profile));
   }
+}
+
+function tokenize(value: string): string[] {
+  return value.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 3);
 }

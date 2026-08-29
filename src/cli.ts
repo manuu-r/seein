@@ -11,7 +11,7 @@ if (command === "migrate") {
   await context.close();
   process.stdout.write("ClickHouse schema is ready.\n");
 } else if (command === "demo") {
-  const prompt = args.join(" ") || "A compact medieval blacksmith workshop with labeled tools";
+  const prompt = args.join(" ") || "Right hepatic hilum anatomy for laparoscopic cholecystectomy with Calot’s triangle and structures at risk";
   const config = loadConfig({
     ...process.env,
     AI_DRIVER: "deterministic",

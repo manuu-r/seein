@@ -14,6 +14,20 @@ import { isCompatibleAssetForGenerator } from "../src/workflow/orchestrator.js";
 
 const temporaryDirectories: string[] = [];
 
+const assessment = (pass: boolean) => ({
+  recognizabilityScore: pass ? 1 : 0.6,
+  domainFidelityScore: pass ? 1 : 0.7,
+  visualQualityScore: pass ? 1 : 0.55,
+  constructionCompletenessScore: pass ? 1 : 0.85,
+  confidence: 1,
+  failedCriteria: pass ? [] : ["Fixture requests a correction."],
+  strengths: pass ? ["Fixture passed."] : [],
+  recommendedAction: pass ? "pass" as const : "direct-fix" as const,
+  targetStudyIds: [],
+  researchQuestions: [],
+  rationale: pass ? "All fixture gates pass." : "A deterministic correction is required.",
+});
+
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })));
 });
@@ -78,7 +92,9 @@ describe("bounded local workflow", () => {
     });
     const services = await createAppServices(config);
     try {
-      const first = await services.orchestrator.run("A labeled blacksmith workshop");
+      const first = await services.orchestrator.run(
+        "Right hepatic hilum anatomy for laparoscopic cholecystectomy",
+      );
       expect(first.project.status).toBe("completed");
       expect(first.initialScene.revision).toBe(1);
       expect(first.finalScene.revision).toBe(2);
@@ -93,7 +109,9 @@ describe("bounded local workflow", () => {
       expect(inspections).toHaveLength(2);
       expect(inspections.at(-1)?.detail.verdict).toBe("pass");
 
-      const second = await services.orchestrator.run("A labeled blacksmith workshop");
+      const second = await services.orchestrator.run(
+        "Right hepatic hilum anatomy for laparoscopic cholecystectomy",
+      );
       const index = JSON.parse(await fs.readFile(path.join(second.project.root, "assets", "index.json"), "utf8")) as Array<{ reused: boolean }>;
       expect(index.every((asset) => asset.reused)).toBe(true);
       const events = (await fs.readFile(path.join(second.project.root, "logs", "events.ndjson"), "utf8"))
@@ -131,7 +149,7 @@ describe("bounded local workflow", () => {
         _spatial?: SpatialReport,
       ): Promise<Inspection> {
         this.inspectionCalls += 1;
-        return { verdict: "pass", category: "none", issue: "", evidence: "No obvious issue.", patch: { kind: "none" } };
+        return { verdict: "pass", category: "none", issue: "", evidence: "No obvious issue.", patch: { kind: "none" }, assessment: assessment(true) };
       }
     }
     class CountingScreenshotDriver extends PlaceholderScreenshotDriver {
@@ -195,6 +213,7 @@ describe("bounded local workflow", () => {
             issue: "",
             evidence: "The regenerated asset was rerendered and verified.",
             patch: { kind: "none" },
+            assessment: assessment(true),
           };
         }
         return {
@@ -210,6 +229,7 @@ describe("bounded local workflow", () => {
               { name: "corrected", primitive: "box", size: [3, 1, 1], position: [0, 0.5, 0], rotation: [0, 0, 0], color: "#f59e0b", bevel: 0.04 },
             ],
           },
+          assessment: assessment(false),
         };
       }
     }
@@ -281,6 +301,7 @@ describe("bounded local workflow", () => {
           issue: "The fixture remains unsatisfied.",
           evidence: `Inspection of revision ${manifest.revision}.`,
           patch: { kind: "camera", position: [10 + manifest.revision, 5, 8], target: [0, 1, 0] },
+          assessment: assessment(false),
         };
       }
     }

@@ -9,13 +9,13 @@ The normal interactive path is:
 3. three `research-perspectives` plus one `reference-image-search` execute concurrently
 4. `synthesize-research → await-research-approval`
 5. approval resumes at `generate-scene`
-6. scene planning, asset resolution/generation, assembly, rendering, and bounded visual QA execute
-7. `visual-qa → await-feedback`
+6. scene planning, procedural/asset resolution, assembly, and state/view visual QA execute
+7. `visual-qa → await-feedback` only when every required target passes at the same revision; otherwise `visual-qa → quality-blocked`
 8. acceptance completes; revision feedback starts a linked project with the user's explicit preferences
 
 `graph/state.json` and ClickHouse carry the exact cursor, wait reason, typed notes, intent, evidence dossier, and progress steps. Gemini works within nodes; `graph-state.ts` owns all valid edges. The direct `orchestrator.run()` path remains for deterministic CLI/CI smoke tests and omits the human interrupts.
 
-Every produced render is inspected, including the last render after a correction. Every transition is appended to both the project event log and the configured context store. A restarted implementation can reconstruct the visible run history without overwriting prior evidence. If the final allowed inspection still requests a fix, the project completes with `finalQaVerdict: "fix"` and `qaExhausted: true` instead of silently claiming success.
+Every produced render is inspected, including the last render after a correction. A correction invalidates passes from older revisions and restarts the required target matrix. Every transition is appended to both the project event log and the configured context store. A model-written `pass` is rejected when scored recognizability, domain fidelity, visual quality, construction completeness, confidence, deterministic spatial checks, or browser health fail. If a safety budget expires before every target passes, the project is checkpointed at `quality-blocked` with `qaExhausted: true`; it is not complete and the feedback/acceptance action is unavailable.
 
 ## Bounded inputs
 
@@ -26,7 +26,11 @@ Every produced render is inspected, including the last render after a correction
 - Research follow-ups: configurable from 1–3 total rounds; 2 by default.
 - Planned scene objects: 8 by default.
 - Asset recipe parts: 16 per asset.
-- Inspection iterations: configurable from 1–4; 2 by default, allowing one correction plus one verification inspection.
+- Inspection/refinement slots: configurable from 1–128; 64 by default, allowing 63 repair actions.
+- Wall time: 30 minutes by default, independently configurable up to six hours. A four-hour run is opt-in with `WORKFLOW_MAX_RUNTIME_MINUTES=240`.
+- Logical AI calls: 240 by default. Cache hits and deterministic checks consume none; provider retries are bounded separately.
+- Targeted self-healing research: up to eight rounds by default, invoked only for semantic/domain failures or stalled repair cycles.
+- Required state/view targets: 24 by default. Every required view applies to its declared `stateIds`, or every state when that list is empty.
 - Patches: at most one per inspection and therefore at most `WORKFLOW_MAX_ITERATIONS - 1` per run.
 - Renderer capture: fixed viewport and camera manifest.
 
@@ -52,13 +56,28 @@ Exact cache keys are preferred. Every candidate GLB is checksum-verified and mea
 
 ## Scene root
 
-The manifest does not contain executable JavaScript. The renderer creates one `THREE.Group` named `SceneRoot`; environment helpers, loaded assets, labels, and transition targets are attached below it or to explicitly documented renderer layers.
+The manifest does not contain executable JavaScript. The renderer creates one `THREE.Group` named `SceneRoot`; environment helpers, loaded assets, procedural construction, labels, and transition targets are attached below it. The procedural payload is a validated data program: coordinate frame and unit conversion, shared landmarks, PBR materials, hierarchy/dependencies, primitives, tapered tubes, extrusions, lathes, instancing, diagnostic views, and measurable invariants.
 
 All planning and scene vectors use the Three.js/glTF Y-up convention. Before executing a primitive recipe, the Blender adapter converts positions and dimensions to Blender's Z-up basis and conjugates non-zero rotations through the same basis. Exported GLBs therefore arrive back in Three.js with the planner's intended orientation.
 
 The Blender driver's recipe version is part of every asset cache key. Coordinate-system or generation changes therefore invalidate older geometry automatically instead of silently reusing an incompatible GLB.
 
 After generation or reuse, the backend parses the GLB scene graph and `POSITION` accessors, applies node transforms, and records the resulting local AABB, size, mesh-instance count, measurement identity, and exact file hash. The spatial analyzer refuses an asset that lacks this measured record. Planner `dimensions` are normalized from the primitive recipe for planning and candidate lookup only; they are not accepted as evidence about an exported GLB.
+
+Procedural geometry uses one `procedural-geometry.ts` builder imported by both the backend analyzer and browser renderer. Bounds are read from the actual `BufferGeometry` built from node parameters, then transformed through the same hierarchy and `metersPerUnit` conversion. Shared-landmark tube junctions are validated in world space.
+
+Procedure states can apply bounded transform and opacity mutations to named imported or procedural entities. The browser animates from immutable base transforms, while target-specific spatial analysis applies the same mutation before measuring bounds and invariants. Transition edges distinguish normal progress, alternatives, and explicit complication branches; arbitrary scripts are not part of the manifest.
+
+## Autonomous recovery policy
+
+Each visual inspection scores recognizability, domain fidelity, visual quality, construction completeness, and confidence. The backend combines those scores with exact spatial issues and browser errors. A failure is routed to one of four bounded actions:
+
+1. rerender after a transient browser/render failure;
+2. apply one local camera, light, transform, label, asset, procedural-node, or shared-landmark correction;
+3. run targeted grounded research and collect fresh reference images when identity, anatomy, proportions, or relationships are uncertain;
+4. replan the affected construction while preserving correct entity IDs and allowing ClickHouse to reuse unchanged components.
+
+Repair fingerprints and recent minimum quality scores detect repeated patches and plateaus. A stalled local loop is automatically promoted to research/replan. Every inspection and action updates `quality/supervisor.json`, an append-only project checkpoint, and the ClickHouse quality-supervisor row, so a process restart can replay cached work inside the original deadline. A deliberate resume after exhaustion creates a fresh supervised time window.
 
 ## Visual correction allowlist
 
@@ -69,10 +88,12 @@ Each inspection may request one of:
 - object position, rotation, or scale
 - label visibility
 - regeneration of exactly one named asset using a replacement recipe of 1–16 validated primitives
+- replacement of exactly one procedural node
+- movement of exactly one shared procedural landmark
 
 An asset-regeneration patch changes only that asset's description and primitive parts, recomputes its recipe bounds, resolves or generates the revised GLB, updates affected object URLs, recomputes spatial evidence, renders, and then reinspects. It cannot add objects, alter arbitrary Blender code, or exceed the global iteration bound.
 
-Before Gemini inspection, the backend transforms the exact GLB-derived local AABBs into world-space AABBs and computes floor clearance, declared-support contact, pair intersections, camera depth, projected coverage, and frustum visibility. Each object fact names its asset ID, SHA-256, local bounds, and measurement source. Gemini receives this evidence with the screenshot: the measured static-geometry facts are authoritative for bounds-related physical claims, while the image remains authoritative for visible fidelity and semantic judgment.
+Before Gemini inspection, the backend transforms exact GLB-derived and shared-builder procedural AABBs into world space and computes floor clearance, declared-support contact, pair intersections, camera depth, projected coverage, frustum visibility, continuity, contact, containment, required visibility, dependency validity, and triangle-budget evidence for the exact target state/view. Each fact names its source and hash. Gemini receives the target-view PNG as inline multimodal input—not merely a path—together with the original request, approved intent, current research brief, object studies, intent coverage, contradictions, scene program, and up to four bounded approved reference images. Geometry facts govern measurable claims while the rendered image governs visible fidelity and semantic judgment. The correction must close a named gap between the observed pixels and the approved acceptance brief.
 
 ## Research collection
 

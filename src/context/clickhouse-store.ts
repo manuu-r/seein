@@ -2,7 +2,9 @@ import { createClient, type ClickHouseClient } from "@clickhouse/client";
 import {
   InspectionSchema,
   ProjectRecordSchema,
+  QualitySupervisorStateSchema,
   ResearchBriefSchema,
+  ReusableProceduralComponentSchema,
   ResolvedAssetSchema,
   RunEventSchema,
   SceneManifestSchema,
@@ -11,11 +13,14 @@ import {
   type AssetSpec,
   type Inspection,
   type ProjectRecord,
+  type QualitySupervisorState,
   type ResearchBrief,
+  type ReusableProceduralComponent,
   type RunEvent,
   type SceneManifest,
   type SpatialReport,
 } from "../contracts.js";
+import { hashObject } from "../lib/hash.js";
 import {
   UserPreferenceProfileSchema,
   WorkflowGraphStateSchema,
@@ -202,6 +207,68 @@ export class ClickHouseContextStore implements ContextStore {
         evidence String,
         created_at DateTime64(3, 'UTC')
       ) ENGINE = ReplacingMergeTree(created_at) ORDER BY (project_id, revision, analyzer, issue_index)`,
+      `CREATE TABLE IF NOT EXISTS procedural_components (
+        component_key FixedString(64),
+        project_id String,
+        revision UInt16,
+        node_id String,
+        study_id String,
+        name String,
+        kind LowCardinality(String),
+        layer LowCardinality(String),
+        material_id String,
+        tags Array(String),
+        depends_on Array(String),
+        payload String,
+        created_at DateTime64(3, 'UTC')
+      ) ENGINE = ReplacingMergeTree(created_at) ORDER BY (component_key, project_id, revision)`,
+      `CREATE TABLE IF NOT EXISTS procedure_states (
+        project_id String,
+        revision UInt16,
+        state_id String,
+        label String,
+        objective String,
+        camera_view_id String,
+        visible_objects Array(String),
+        visible_nodes Array(String),
+        highlighted_objects Array(String),
+        highlighted_nodes Array(String),
+        payload String,
+        created_at DateTime64(3, 'UTC')
+      ) ENGINE = ReplacingMergeTree(created_at) ORDER BY (project_id, revision, state_id)`,
+      `CREATE TABLE IF NOT EXISTS qa_target_results (
+        project_id String,
+        revision UInt16,
+        target_id String,
+        state_id String,
+        view_id String,
+        verdict LowCardinality(String),
+        category LowCardinality(String),
+        patch_kind LowCardinality(String),
+        recognizability Float32,
+        domain_fidelity Float32,
+        visual_quality Float32,
+        construction_completeness Float32,
+        confidence Float32,
+        recommended_action LowCardinality(String),
+        issue String,
+        payload String,
+        created_at DateTime64(3, 'UTC')
+      ) ENGINE = ReplacingMergeTree(created_at) ORDER BY (project_id, revision, target_id)`,
+      `CREATE TABLE IF NOT EXISTS quality_supervisor_states (
+        project_id String,
+        attempt UInt16,
+        status LowCardinality(String),
+        revision UInt16,
+        target_id String,
+        recognizability Float32,
+        domain_fidelity Float32,
+        visual_quality Float32,
+        construction_completeness Float32,
+        logical_ai_calls UInt16,
+        payload String,
+        updated_at DateTime64(3, 'UTC')
+      ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (project_id, attempt)`,
       `ALTER TABLE run_events ADD COLUMN IF NOT EXISTS payload String AFTER detail`,
       `ALTER TABLE assets ADD COLUMN IF NOT EXISTS style LowCardinality(String) AFTER tags`,
       `ALTER TABLE assets ADD COLUMN IF NOT EXISTS dimensions Array(Float32) AFTER style`,
@@ -217,6 +284,12 @@ export class ClickHouseContextStore implements ContextStore {
       `ALTER TABLE spatial_object_facts ADD COLUMN IF NOT EXISTS geometry_source LowCardinality(String) AFTER asset_sha256`,
       `ALTER TABLE spatial_object_facts ADD COLUMN IF NOT EXISTS local_bounds_min Array(Float32) AFTER geometry_source`,
       `ALTER TABLE spatial_object_facts ADD COLUMN IF NOT EXISTS local_bounds_max Array(Float32) AFTER local_bounds_min`,
+      `ALTER TABLE qa_target_results ADD COLUMN IF NOT EXISTS recognizability Float32 AFTER patch_kind`,
+      `ALTER TABLE qa_target_results ADD COLUMN IF NOT EXISTS domain_fidelity Float32 AFTER recognizability`,
+      `ALTER TABLE qa_target_results ADD COLUMN IF NOT EXISTS visual_quality Float32 AFTER domain_fidelity`,
+      `ALTER TABLE qa_target_results ADD COLUMN IF NOT EXISTS construction_completeness Float32 AFTER visual_quality`,
+      `ALTER TABLE qa_target_results ADD COLUMN IF NOT EXISTS confidence Float32 AFTER construction_completeness`,
+      `ALTER TABLE qa_target_results ADD COLUMN IF NOT EXISTS recommended_action LowCardinality(String) AFTER confidence`,
     ];
     for (const query of statements) await this.client.command({ query });
   }
@@ -330,6 +403,29 @@ export class ClickHouseContextStore implements ContextStore {
     ]);
   }
 
+  async findProceduralComponents(queryTerms: string[], limit = 12): Promise<ReusableProceduralComponent[]> {
+    const terms = [...new Set(queryTerms.flatMap(tokenize))];
+    if (terms.length === 0) return [];
+    const rows = await this.query(
+      // tags has to be aggregated like payload: the row set is deduplicated by
+      // component_key, so the score must come from the same latest version.
+      `SELECT argMax(payload, created_at) AS payload,
+              length(arrayIntersect(argMax(tags, created_at), {terms:Array(String)})) AS score,
+              max(created_at) AS newest
+       FROM procedural_components
+       WHERE hasAny(tags, {terms:Array(String)})
+       GROUP BY component_key
+       ORDER BY score DESC, newest DESC
+       LIMIT {limit:UInt16}`,
+      { terms, limit },
+    );
+    return rows.flatMap((row) => {
+      if (typeof row.payload !== "string") return [];
+      const parsed = ReusableProceduralComponentSchema.safeParse(JSON.parse(row.payload));
+      return parsed.success ? [parsed.data] : [];
+    });
+  }
+
   async findAssets(requests: AssetLookupRequest[], relatedLimit = 5): Promise<Map<string, AssetCandidates>> {
     const result = new Map<string, AssetCandidates>();
     if (requests.length === 0) return result;
@@ -408,6 +504,27 @@ export class ClickHouseContextStore implements ContextStore {
   }
 
   async storeScene(projectId: string, manifest: SceneManifest, sha256: string, path: string): Promise<void> {
+    const proceduralComponents: ReusableProceduralComponent[] = [];
+    if (manifest.procedural) {
+      const materials = new Map(manifest.procedural.materials.map((material) => [material.id, material]));
+      const landmarks = new Map(manifest.procedural.landmarks.map((landmark) => [landmark.id, landmark]));
+      for (const node of manifest.procedural.nodes) {
+        const material = materials.get(node.materialId);
+        if (!material) continue;
+        const usedLandmarks = node.kind === "tube"
+          ? node.points.flatMap((point) => point.landmarkId && landmarks.has(point.landmarkId) ? [landmarks.get(point.landmarkId)!] : [])
+          : [];
+        proceduralComponents.push({
+          componentKey: hashObject({ node, material, landmarks: usedLandmarks }),
+          node,
+          material,
+          landmarks: usedLandmarks,
+          sourceProjectId: projectId,
+          sourceRevision: manifest.revision,
+          createdAt: manifest.generatedAt,
+        });
+      }
+    }
     await Promise.all([
       this.insert("scene_revisions", [
         {
@@ -445,6 +562,41 @@ export class ClickHouseContextStore implements ContextStore {
           created_at: clickhouseNow(),
         })),
       ) : Promise.resolve(),
+      proceduralComponents.length > 0 ? this.insert(
+        "procedural_components",
+        proceduralComponents.map((component) => ({
+          component_key: component.componentKey,
+          project_id: projectId,
+          revision: manifest.revision,
+          node_id: component.node.id,
+          study_id: component.node.studyId,
+          name: component.node.name,
+          kind: component.node.kind,
+          layer: component.node.layer,
+          material_id: component.node.materialId,
+          tags: tokenize(`${component.node.studyId} ${component.node.name} ${component.node.tags.join(" ")}`),
+          depends_on: component.node.dependsOn,
+          payload: JSON.stringify(component),
+          created_at: clickhouseNow(),
+        })),
+      ) : Promise.resolve(),
+      manifest.states.length > 0 ? this.insert(
+        "procedure_states",
+        manifest.states.map((state) => ({
+          project_id: projectId,
+          revision: manifest.revision,
+          state_id: state.id,
+          label: state.label,
+          objective: state.objective,
+          camera_view_id: state.cameraViewId ?? "",
+          visible_objects: state.visibleObjects,
+          visible_nodes: state.visibleNodes,
+          highlighted_objects: state.highlightedObjects,
+          highlighted_nodes: state.highlightedNodes,
+          payload: JSON.stringify(state),
+          created_at: clickhouseNow(),
+        })),
+      ) : Promise.resolve(),
     ]);
   }
 
@@ -461,13 +613,33 @@ export class ClickHouseContextStore implements ContextStore {
   }
 
   async storeQa(projectId: string, revision: number, inspection: Inspection): Promise<void> {
-    await this.insert("qa_reports", [
-      {
+    const parsed = InspectionSchema.parse(inspection);
+    await Promise.all([
+      this.insert("qa_reports", [{
         project_id: projectId,
         revision,
-        payload: JSON.stringify(InspectionSchema.parse(inspection)),
+        payload: JSON.stringify(parsed),
         created_at: clickhouseNow(),
-      },
+      }]),
+      parsed.targetId ? this.insert("qa_target_results", [{
+        project_id: projectId,
+        revision,
+        target_id: parsed.targetId,
+        state_id: parsed.stateId ?? "",
+        view_id: parsed.viewId ?? "",
+        verdict: parsed.verdict,
+        category: parsed.category,
+        patch_kind: parsed.patch.kind,
+        recognizability: parsed.assessment.recognizabilityScore,
+        domain_fidelity: parsed.assessment.domainFidelityScore,
+        visual_quality: parsed.assessment.visualQualityScore,
+        construction_completeness: parsed.assessment.constructionCompletenessScore,
+        confidence: parsed.assessment.confidence,
+        recommended_action: parsed.assessment.recommendedAction,
+        issue: parsed.issue,
+        payload: JSON.stringify(parsed),
+        created_at: clickhouseNow(),
+      }]) : Promise.resolve(),
     ]);
   }
 
@@ -520,6 +692,34 @@ export class ClickHouseContextStore implements ContextStore {
         })),
       ) : Promise.resolve(),
     ]);
+  }
+
+  async findQualitySupervisorState(projectId: string): Promise<QualitySupervisorState | null> {
+    const rows = await this.query(
+      `SELECT argMax(payload, updated_at) AS payload
+       FROM quality_supervisor_states WHERE project_id = {projectId:String} GROUP BY project_id`,
+      { projectId },
+    );
+    const payload = rows[0]?.payload;
+    return typeof payload === "string" ? QualitySupervisorStateSchema.parse(JSON.parse(payload)) : null;
+  }
+
+  async storeQualitySupervisorState(state: QualitySupervisorState): Promise<void> {
+    const parsed = QualitySupervisorStateSchema.parse(state);
+    await this.insert("quality_supervisor_states", [{
+      project_id: parsed.projectId,
+      attempt: parsed.attempt,
+      status: parsed.status,
+      revision: parsed.currentRevision,
+      target_id: parsed.currentTargetId ?? "",
+      recognizability: parsed.bestScores.recognizability,
+      domain_fidelity: parsed.bestScores.domainFidelity,
+      visual_quality: parsed.bestScores.visualQuality,
+      construction_completeness: parsed.bestScores.constructionCompleteness,
+      logical_ai_calls: parsed.logicalAiCalls,
+      payload: JSON.stringify(parsed),
+      updated_at: parsed.updatedAt.replace("T", " ").replace("Z", ""),
+    }]);
   }
 
   async findGraphState(projectId: string): Promise<WorkflowGraphState | null> {
@@ -635,6 +835,10 @@ function parseAssetRow(row: ClickHouseRow | undefined): AssetRecord | null {
 
 function clickhouseNow(): string {
   return new Date().toISOString().replace("T", " ").replace("Z", "");
+}
+
+function tokenize(value: string): string[] {
+  return [...new Set(value.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 3))];
 }
 
 function assetScore(requested: AssetSpec, candidate: AssetSpec): number {

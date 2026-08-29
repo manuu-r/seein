@@ -36,6 +36,8 @@ describe("interactive agent graph", () => {
       CONTEXT_DRIVER: "memory",
       BLENDER_DRIVER: "deterministic",
       SCREENSHOT_DRIVER: "placeholder",
+      WORKFLOW_PROVIDER_RETRIES: "1",
+      WORKFLOW_RETRY_BASE_MS: "0",
     });
     class ConcurrentResearchAI extends DeterministicWorkflowAI {
       active = 0;
@@ -216,6 +218,8 @@ describe("interactive agent graph", () => {
       CONTEXT_DRIVER: "memory",
       BLENDER_DRIVER: "deterministic",
       SCREENSHOT_DRIVER: "placeholder",
+      WORKFLOW_PROVIDER_RETRIES: "1",
+      WORKFLOW_RETRY_BASE_MS: "0",
     });
 
     class FlakySynthesisAI extends DeterministicWorkflowAI {

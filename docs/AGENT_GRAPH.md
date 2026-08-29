@@ -33,10 +33,18 @@ flowchart TD
     H -->|"approve"| I["Plan scene graph"]
     I --> J["Resolve or generate assets"]
     J --> K["Assemble + measure spatial graph"]
-    K --> L["Render"]
-    L --> M["Gemini visual inspection"]
-    M -->|"bounded repair"| J
-    M -->|"pass or bound reached"| N["Wait for user feedback"]
+    K --> L["Build required state/view targets"]
+    L --> M["Render + Gemini scored inspection"]
+    M --> R{"Backend quality and progress gate"}
+    R -->|"local defect"| K
+    R -->|"identity/domain failure or stalled repair"| S["Targeted grounded research"]
+    S --> T["Recovery replan; reuse unchanged components"]
+    T --> K
+    R -->|"transient renderer failure"| L
+    R -->|"current target passes; inspect next"| L
+    R -->|"all scored and deterministic gates pass at one revision"| N["Wait for user feedback"]
+    R -->|"time, action, or API budget reached"| Q["Quality-blocked checkpoint"]
+    Q -->|"resume"| I
     N -->|"accept"| O["Complete"]
     N -->|"scene or intent correction"| P["Start linked revision at clarification"]
 ```
@@ -51,7 +59,7 @@ Every project has one immutable sequence of graph checkpoints. A checkpoint cont
 - `notes`: small typed facts, never an unbounded transcript;
 - `researchAgenda`: perspective-specific questions, queries, and required evidence;
 - `researchDossier`: source-bound findings, object studies, image references, contradictions, gaps, and readiness scores;
-- final scene revision, bounded inspection result, and feedback routing; detailed scene geometry, relationships, screenshots, and revisions remain in their dedicated artifact and ClickHouse records;
+- final scene revision, scored inspection result, quality-supervisor deadline/action/API state, and feedback routing; detailed scene geometry, relationships, screenshots, and revisions remain in their dedicated artifact and ClickHouse records;
 - `preferenceProfile`: explicit, scoped preferences learned from user feedback;
 - `steps`: user-facing progress and the next safe action.
 
@@ -96,7 +104,7 @@ The readiness gate is deterministic. Generation is forbidden until all required 
 
 The audit may request one bounded follow-up research round. If the remaining gap depends on taste or intent rather than public evidence, the graph asks the user instead of searching indefinitely.
 
-Gemini Google Web Search grounding on 3.7 Flash and Google Image Search grounding on 3.1 Flash Image remain the default discovery path. Firecrawl is an optional targeted extractor only when an approved source is JavaScript-heavy or a user explicitly requests deep traversal; it is not a second default search engine.
+Gemini Google Web Search grounding on 3.7 Flash remains the claim/citation path, and Gemini 3.1 Flash Image contributes image-grounding metadata. The default Firecrawl adapter performs a narrow per-object reference-image search so the planner receives direct downloadable images; it does not author research claims. Recursive site traversal remains opt-in.
 
 ## Guided visualization and feedback
 

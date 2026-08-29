@@ -15,7 +15,9 @@ Store in ClickHouse:
 - typed object relationships;
 - screenshot paths and hashes;
 - spatial reports, per-object facts, and issue evidence;
-- QA verdicts and patches.
+- reusable procedural nodes with materials, referenced landmarks, tags, dependencies, and source revision;
+- procedure-state visibility/highlight/camera definitions;
+- target-specific QA verdicts and patches plus the final coverage ledger.
 
 Do not store GLB, PNG, or reference-image bytes in ClickHouse. Keeping blobs in artifact storage makes local/cloud migration, CDN delivery, checksums, and lifecycle rules straightforward.
 
@@ -34,10 +36,14 @@ Do not store GLB, PNG, or reference-image bytes in ClickHouse. Keeping blobs in 
 | `scene_objects` | Fast per-revision object state lookup |
 | `object_relationships` | Typed scene-graph edges |
 | `renders` | Initial/final screenshot paths and hashes |
-| `qa_reports` | Gemini verdict, evidence, and allowlisted patch |
+| `qa_reports` | Gemini verdict, scored assessment, evidence, and allowlisted patch |
 | `spatial_reports` | Full deterministic spatial report by scene revision |
 | `spatial_object_facts` | Asset/hash/measurement provenance, local/world bounds, clearance, depth, coverage, and framing per object |
 | `spatial_issues` | Queryable collision, support, scale, and framing evidence |
+| `procedural_components` | Content-addressed procedural nodes/materials/landmarks for cross-project retrieval |
+| `quality_supervisor_states` | Durable attempt, deadline, score, stall, recovery, and API-budget checkpoints for long-running autonomous QA |
+| `qa_target_results` | Per-revision/state/view verdicts with typed recognizability, domain, visual, construction, confidence, and recovery-action columns |
+| `procedure_states` | Flattened state objectives, visibility, highlights, and camera bindings per revision |
 
 Replacing tables retain the newest value by deterministic key. Revision/evidence tables remain append-oriented. Project folders are still the recoverable artifact source of truth.
 
@@ -50,7 +56,7 @@ Asset resolution performs two ClickHouse queries for an entire plan, not two que
 
 The backend scores that pool and then enforces generator identity, category, style, tag overlap, file existence, and SHA-256 validity. It measures each surviving GLB from its accessors and node transforms and compares those measured bounds with the requested primitive-recipe bounds. A related hit must remain within the strict size and local-anchor tolerances; a compatible hit receives an alias under the requested content key carrying the measured record.
 
-Project list/status, latest scene, events, and the latest resumable graph checkpoint are served from ClickHouse. The filesystem fallback warms the index when running with a fresh in-memory store or importing older project folders.
+Before planning, object-study IDs, names, identity markers, and materials are tokenized once and used in one bounded `procedural_components` query. Matching nodes are passed to Gemini as optional construction snippets; evidence compatibility remains the gate, so retrieval never forces reuse. Project list/status, latest scene, events, and the latest resumable graph checkpoint are also served from ClickHouse. The filesystem fallback warms the index when running with a fresh in-memory store or importing older project folders.
 
 ## Write path
 
@@ -58,7 +64,9 @@ Project list/status, latest scene, events, and the latest resumable graph checkp
 - Run events use a short 75 ms buffer and a 32-event threshold.
 - Latest project snapshots are coalesced by project ID before insertion; events preserve stage history.
 - Graph checkpoints write synchronously at node boundaries because losing an interrupt cursor is more expensive than one small insert; `(project_id, sequence)` retains history while `argMax` serves the hot resume path.
-- Scene manifest, object rows, and relationship rows insert concurrently.
+- Scene manifest, object rows, relationships, procedural components, and procedure states insert concurrently.
+- Target-specific QA writes the full report and its typed target, score, confidence, recovery-action, verdict, category, and patch fields concurrently.
+- Quality-supervisor checkpoints persist deadline, attempts, best/recent scores, repair fingerprints, recovery counts, and logical AI usage after every inspection or action.
 - Spatial report, object facts, and issue rows insert concurrently.
 - Full payload strings preserve the validated contract; frequently queried fields are duplicated into typed columns.
 - Asset rows expose `bounds_min`, `bounds_max`, `geometry_size`, and `geometry_source`; spatial rows duplicate `asset_id`, `asset_sha256`, `geometry_source`, and local bounds so provenance checks do not require payload parsing.

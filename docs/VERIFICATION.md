@@ -16,12 +16,12 @@ npm audit --omit=dev
 Current result:
 
 - TypeScript typecheck passes.
-- 5 test files and 19 tests pass.
+- 9 test files and 37 tests pass.
 - Renderer and backend production builds pass.
 - The renderer bundle has a non-blocking size warning; it is intentionally a single minimal viewer entry for the MVP.
 - The production dependency audit reports 0 vulnerabilities.
 
-Tests cover contract bounds, artifact path safety, deterministic single/batch GLB generation, Y-up to Z-up conversion, GLB accessor measurement, generator-version cache isolation, refusal of unmeasured spatial inputs, declared-versus-measured geometry disagreement, strict measured reuse compatibility, world bounds, camera framing, support-contact validation, the bounded state machine, indexed reads, single-asset geometry regeneration, final-render reinspection, exhaustion reporting, no-op/pass handling, and repeat-run AI/render cache reuse.
+Tests cover contract bounds, artifact path safety, deterministic single/batch GLB generation, Y-up to Z-up conversion, GLB accessor measurement, generator-version cache isolation, refusal of unmeasured spatial inputs, declared-versus-measured geometry disagreement, strict measured reuse compatibility, shared-builder procedural bounds, unit conversion, shared-landmark continuity, procedural patches, component retrieval, required state/view target expansion, pass invalidation after a patch, no-Blender procedural execution, the bounded state machine, indexed reads, single-asset geometry regeneration, final-render reinspection, quality-blocked exhaustion, no-op/pass handling, repeat-run AI/render cache reuse, false-pass rejection, recognizability-driven targeted research/replanning, repeated-repair escalation, transient-provider retry, durable quality-blocked resume, and automatic recovery of orphaned running checkpoints after backend restart.
 
 ## Live local verification
 
@@ -30,6 +30,7 @@ Previously verified on Docker Desktop with the `linux/amd64` core image and Clic
 | Capability | Result | Evidence |
 |---|---|---|
 | ClickHouse migration | Pass | Project/cache/spatial additions created idempotently on the existing database |
+| Quality-supervisor migration | Pass | Existing database upgraded in place; an isolated fresh database created all 19 tables, including typed QA scores and `quality_supervisor_states`, then was removed |
 | Measured-geometry migration | Pass | Additive asset-bound and spatial-provenance columns applied on the existing ClickHouse 25.8 database |
 | ClickHouse workflow | Pass | Project index, workflow cache, two spatial reports, and six per-object spatial facts persisted |
 | Cross-process warm path | Pass | Research, plan, initial render, inspection, and patched final render all returned `cacheHit: true`; final project index returned `completed` |
@@ -40,6 +41,10 @@ Previously verified on Docker Desktop with the `linux/amd64` core image and Clic
 | Coordinate contract | Pass | Final visual has a horizontal platform and upright subject/marker |
 | Three.js renderer | Pass | All three real Blender GLBs loaded below `SceneRoot` |
 | Chromium capture | Pass | Revision 1 and revision 2 screenshots created with no browser errors |
+| Procedural renderer | Pass | Shared tapered-tube/extrusion/instancing demo rendered under `SceneRoot`; transparency and label anchors preserved |
+| Current production renderer smoke | Pass | Built viewer loaded the seven-node procedural demo in the in-app browser, switched from Overview to Junction, retained WebGL output, and reported zero console/browser errors |
+| Explicit readiness | Pass | Headless capture waited for assets, procedural compilation, camera settlement, and two stable frames; zero browser errors |
+| Target camera lock | Pass | A requested `state=overview&view=side` capture remained on the side camera instead of being overwritten by the state's interactive default |
 | Bounded refinement | Pass | Revision 1 produced one camera patch; revision 2 was rendered and independently reinspected as `pass` |
 | Spatial provenance | Pass | Both revisions persisted the exact asset SHA-256, GLB measurement identity, and local measured bounds |
 | Docker image | Pass | Final amd64 image builds with a 20–25 KB context |
@@ -74,7 +79,7 @@ After setting the key in `.env`, the production-local acceptance test is:
 docker compose up --build
 curl -X POST http://localhost:8787/api/projects \
   -H 'content-type: application/json' \
-  -d '{"prompt":"A compact medieval blacksmith workshop with labeled tools"}'
+  -d '{"prompt":"Right hepatic hilum anatomy for laparoscopic cholecystectomy with Calot’s triangle and structures at risk"}'
 ```
 
 Accept the run only when its events finish at `completed`, research contains grounded sources/references, the initial screenshot exists, any patched final screenshot exists, and fresh render events have an empty `browserErrors` array.

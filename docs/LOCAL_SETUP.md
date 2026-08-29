@@ -36,10 +36,21 @@ Verification mode exercises project creation, caching, asset generation, manifes
 The QA loop is bounded with:
 
 ```env
-WORKFLOW_MAX_ITERATIONS=2
+WORKFLOW_MAX_ITERATIONS=64
+WORKFLOW_MAX_QA_TARGETS=24
+WORKFLOW_MAX_RUNTIME_MINUTES=30
+WORKFLOW_MAX_LOGICAL_AI_CALLS=240
+WORKFLOW_MAX_TARGETED_RESEARCH_ROUNDS=8
+WORKFLOW_MIN_RECOGNIZABILITY=0.82
+WORKFLOW_MIN_DOMAIN_FIDELITY=0.78
+WORKFLOW_MIN_VISUAL_QUALITY=0.72
+WORKFLOW_MIN_CONSTRUCTION_COMPLETENESS=0.9
+WORKFLOW_AUTO_RESUME_INTERRUPTED=true
 ```
 
-Allowed values are 1–4. The default `2` means “inspect the initial render, apply at most one patch, then inspect the corrected render.” A value of `1` performs inspection without any correction opportunity. If the last allowed inspection still asks for a fix, the run records `qaExhausted: true`.
+Allowed values are 1–128. The default `64` permits at most 63 repair actions, while the independent 30-minute and 240-logical-AI-call limits prevent runaway cost. Set `WORKFLOW_MAX_RUNTIME_MINUTES=240` only when starting a deliberate four-hour unattended run. Passing a target does not consume a repair slot, and every correction invalidates earlier target passes. A value of `1` performs inspection without a correction opportunity. If any safety budget is reached, the run records `qaExhausted: true` and checkpoints at `quality-blocked`; it is not complete. Resuming starts a fresh supervised window while retaining cached research, assets, scenes, renders, and the previous quality ledger.
+
+`WORKFLOW_AUTO_RESUME_INTERRUPTED=true` is the default. On startup, the backend distinguishes live in-process runs from orphaned `running` checkpoints and restarts the latter from their owning graph stage. Set it to `false` when deployments require an external job scheduler to own recovery.
 
 ## ClickHouse
 

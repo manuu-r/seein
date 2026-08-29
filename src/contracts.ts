@@ -82,6 +82,7 @@ export const PlannedObjectSchema = z.object({
   rotation: Vec3Schema,
   scale: Vec3Schema,
   label: z.string().min(1),
+  labelPosition: Vec3Schema.optional(),
   highlight: z.boolean().default(false),
 });
 
@@ -92,18 +93,253 @@ export const RelationshipSchema = z.object({
   description: z.string().default(""),
 });
 
+export const SceneStateMutationSchema = z.object({
+  entityId: z.string().min(1),
+  position: Vec3Schema.optional(),
+  rotation: Vec3Schema.optional(),
+  scale: Vec3Schema.optional(),
+  opacity: z.number().min(0).max(1).optional(),
+}).refine(
+  (mutation) =>
+    mutation.position !== undefined ||
+    mutation.rotation !== undefined ||
+    mutation.scale !== undefined ||
+    mutation.opacity !== undefined,
+  { message: "A scene-state mutation must change at least one property" },
+);
+export type SceneStateMutation = z.infer<typeof SceneStateMutationSchema>;
+
 export const SceneStateSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
+  objective: z.string().min(1).default("Present the configured scene state."),
   visibleObjects: z.array(z.string()),
   highlightedObjects: z.array(z.string()),
+  visibleNodes: z.array(z.string()).default([]),
+  highlightedNodes: z.array(z.string()).default([]),
+  cameraViewId: z.string().optional(),
+  mutations: z.array(SceneStateMutationSchema).max(64).default([]),
 });
 
 export const SceneTransitionSchema = z.object({
   from: z.string().min(1),
   to: z.string().min(1),
   durationMs: z.number().int().min(100).max(10000),
+  kind: z.enum(["normal", "alternative", "complication"]).default("normal"),
+  condition: z.string().min(1).optional(),
+  description: z.string().default(""),
+}).refine(
+  (transition) => transition.kind === "normal" || transition.condition !== undefined,
+  { message: "Alternative and complication transitions require an explicit condition", path: ["condition"] },
+);
+
+const SceneEntityIdSchema = z.string().regex(/^[a-z][a-z0-9_-]*$/);
+
+export const ProceduralMaterialSchema = z.object({
+  id: SceneEntityIdSchema,
+  name: z.string().min(1),
+  color: HexColorSchema,
+  roughness: z.number().min(0).max(1).default(0.7),
+  metalness: z.number().min(0).max(1).default(0),
+  opacity: z.number().min(0.05).max(1).default(1),
+  emissive: HexColorSchema.default("#000000"),
+  emissiveIntensity: z.number().min(0).max(5).default(0),
+  side: z.enum(["front", "back", "double"]).default("front"),
 });
+export type ProceduralMaterial = z.infer<typeof ProceduralMaterialSchema>;
+
+export const ProceduralLandmarkSchema = z.object({
+  id: SceneEntityIdSchema,
+  label: z.string().min(1),
+  position: Vec3Schema,
+  description: z.string().min(1),
+});
+export type ProceduralLandmark = z.infer<typeof ProceduralLandmarkSchema>;
+
+export const ProceduralPathPointSchema = z.object({
+  landmarkId: SceneEntityIdSchema.optional(),
+  position: Vec3Schema.optional(),
+  offset: Vec3Schema.default([0, 0, 0]),
+  radius: z.number().positive().optional(),
+});
+export type ProceduralPathPoint = z.infer<typeof ProceduralPathPointSchema>;
+
+const ProceduralTransformFields = {
+  position: Vec3Schema.default([0, 0, 0]),
+  rotation: Vec3Schema.default([0, 0, 0]),
+  scale: PositiveVec3Schema.default([1, 1, 1]),
+};
+
+const ProceduralNodeBaseSchema = z.object({
+  id: SceneEntityIdSchema,
+  name: z.string().min(1),
+  studyId: SceneEntityIdSchema,
+  tags: z.array(z.string().min(1).max(80)).max(12).default([]),
+  materialId: SceneEntityIdSchema,
+  parentId: SceneEntityIdSchema.optional(),
+  dependsOn: z.array(SceneEntityIdSchema).max(12).default([]),
+  layer: z.enum([
+    "context",
+    "covering",
+    "surface",
+    "primary",
+    "landmark",
+    "instrument",
+    "effect",
+    "annotation",
+  ]).default("primary"),
+  label: z.string().min(1),
+  labelVisible: z.boolean().default(true),
+  highlight: z.boolean().default(false),
+  castShadow: z.boolean().default(true),
+  receiveShadow: z.boolean().default(true),
+  ...ProceduralTransformFields,
+});
+
+export const ProceduralPrimitiveNodeSchema = ProceduralNodeBaseSchema.extend({
+  kind: z.literal("primitive"),
+  shape: z.enum(["box", "sphere", "cylinder", "cone", "torus", "capsule"]),
+  size: PositiveVec3Schema,
+  segments: z.number().int().min(6).max(64).default(24),
+});
+
+export const ProceduralTubeNodeSchema = ProceduralNodeBaseSchema.extend({
+  kind: z.literal("tube"),
+  points: z.array(ProceduralPathPointSchema).min(2).max(48),
+  radius: z.number().positive(),
+  radialSegments: z.number().int().min(5).max(32).default(12),
+  tubularSegments: z.number().int().min(4).max(256).default(48),
+  closed: z.boolean().default(false),
+});
+
+export const ProceduralExtrusionNodeSchema = ProceduralNodeBaseSchema.extend({
+  kind: z.literal("extrusion"),
+  outline: z.array(z.tuple([z.number(), z.number()])).min(3).max(48),
+  depth: z.number().positive(),
+  bevel: z.number().min(0).max(100).default(0),
+});
+
+export const ProceduralLatheNodeSchema = ProceduralNodeBaseSchema.extend({
+  kind: z.literal("lathe"),
+  profile: z.array(z.tuple([z.number().min(0), z.number()])).min(2).max(48),
+  segments: z.number().int().min(8).max(96).default(32),
+});
+
+export const ProceduralInstanceTransformSchema = z.object({
+  position: Vec3Schema,
+  rotation: Vec3Schema.default([0, 0, 0]),
+  scale: PositiveVec3Schema.default([1, 1, 1]),
+});
+
+export const ProceduralInstancesNodeSchema = ProceduralNodeBaseSchema.extend({
+  kind: z.literal("instances"),
+  shape: z.enum(["box", "sphere", "cylinder", "cone"]),
+  size: PositiveVec3Schema,
+  segments: z.number().int().min(6).max(32).default(16),
+  instances: z.array(ProceduralInstanceTransformSchema).min(1).max(256),
+});
+
+export const ProceduralNodeSchema = z.discriminatedUnion("kind", [
+  ProceduralPrimitiveNodeSchema,
+  ProceduralTubeNodeSchema,
+  ProceduralExtrusionNodeSchema,
+  ProceduralLatheNodeSchema,
+  ProceduralInstancesNodeSchema,
+]);
+export type ProceduralNode = z.infer<typeof ProceduralNodeSchema>;
+
+export const ProceduralViewSchema = z.object({
+  id: SceneEntityIdSchema,
+  label: z.string().min(1),
+  purpose: z.string().min(1),
+  position: Vec3Schema,
+  target: Vec3Schema,
+  fov: z.number().min(15).max(100),
+  required: z.boolean().default(true),
+  stateIds: z.array(SceneEntityIdSchema).max(12).default([]),
+});
+export type ProceduralView = z.infer<typeof ProceduralViewSchema>;
+
+export const ProceduralInvariantSchema = z.discriminatedUnion("kind", [
+  z.object({
+    id: SceneEntityIdSchema,
+    kind: z.literal("continuity"),
+    label: z.string().min(1),
+    nodeA: SceneEntityIdSchema,
+    endA: z.enum(["start", "end"]),
+    nodeB: SceneEntityIdSchema,
+    endB: z.enum(["start", "end"]),
+    tolerance: z.number().positive(),
+    required: z.boolean().default(true),
+  }),
+  z.object({
+    id: SceneEntityIdSchema,
+    kind: z.literal("contact"),
+    label: z.string().min(1),
+    nodeA: SceneEntityIdSchema,
+    nodeB: SceneEntityIdSchema,
+    tolerance: z.number().positive(),
+    required: z.boolean().default(true),
+  }),
+  z.object({
+    id: SceneEntityIdSchema,
+    kind: z.literal("containment"),
+    label: z.string().min(1),
+    innerNode: SceneEntityIdSchema,
+    outerNode: SceneEntityIdSchema,
+    tolerance: z.number().min(0),
+    required: z.boolean().default(true),
+  }),
+  z.object({
+    id: SceneEntityIdSchema,
+    kind: z.literal("distance"),
+    label: z.string().min(1),
+    nodeA: SceneEntityIdSchema,
+    nodeB: SceneEntityIdSchema,
+    min: z.number().min(0),
+    max: z.number().positive(),
+    required: z.boolean().default(true),
+  }),
+  z.object({
+    id: SceneEntityIdSchema,
+    kind: z.literal("visible"),
+    label: z.string().min(1),
+    nodeId: SceneEntityIdSchema,
+    viewId: SceneEntityIdSchema,
+    required: z.boolean().default(true),
+  }),
+]);
+export type ProceduralInvariant = z.infer<typeof ProceduralInvariantSchema>;
+
+export const ProceduralProgramSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  coordinateFrame: z.object({
+    name: z.string().min(1),
+    units: z.enum(["meters", "centimeters", "millimeters"]),
+    metersPerUnit: z.number().positive().max(1),
+    upAxis: z.literal("Y"),
+    handedness: z.literal("right"),
+    originDescription: z.string().min(1),
+  }),
+  landmarks: z.array(ProceduralLandmarkSchema).max(96).default([]),
+  materials: z.array(ProceduralMaterialSchema).min(1).max(48),
+  nodes: z.array(ProceduralNodeSchema).min(1).max(128),
+  views: z.array(ProceduralViewSchema).min(1).max(12),
+  invariants: z.array(ProceduralInvariantSchema).max(96).default([]),
+  triangleBudget: z.number().int().min(1000).max(2_000_000).default(250_000),
+});
+export type ProceduralProgram = z.infer<typeof ProceduralProgramSchema>;
+
+export const ReusableProceduralComponentSchema = z.object({
+  componentKey: z.string().length(64),
+  node: ProceduralNodeSchema,
+  material: ProceduralMaterialSchema,
+  landmarks: z.array(ProceduralLandmarkSchema).max(48),
+  sourceProjectId: z.string().min(1),
+  sourceRevision: z.number().int().positive(),
+  createdAt: z.iso.datetime(),
+});
+export type ReusableProceduralComponent = z.infer<typeof ReusableProceduralComponentSchema>;
 
 export const ScenePlanSchema = z.object({
   title: z.string().min(1),
@@ -119,8 +355,9 @@ export const ScenePlanSchema = z.object({
     fov: z.number().min(20).max(90),
   }),
   lights: z.array(LightSchema).min(1).max(6),
-  assets: z.array(AssetSpecSchema).min(1).max(8),
-  objects: z.array(PlannedObjectSchema).min(1).max(12),
+  assets: z.array(AssetSpecSchema).max(8).default([]),
+  objects: z.array(PlannedObjectSchema).max(12).default([]),
+  procedural: ProceduralProgramSchema.optional(),
   relationships: z.array(RelationshipSchema).max(20),
   states: z.array(SceneStateSchema).max(8),
   transitions: z.array(SceneTransitionSchema).max(8),
@@ -165,6 +402,7 @@ export const SceneManifestSchema = z.object({
   camera: ScenePlanSchema.shape.camera,
   lights: ScenePlanSchema.shape.lights,
   objects: z.array(SceneObjectSchema),
+  procedural: ProceduralProgramSchema.optional(),
   relationships: z.array(RelationshipSchema),
   states: z.array(SceneStateSchema),
   transitions: z.array(SceneTransitionSchema),
@@ -176,7 +414,7 @@ export const SpatialObjectFactSchema = z.object({
   objectId: z.string().min(1),
   assetId: z.string().min(1),
   assetSha256: z.string().length(64),
-  geometrySource: AssetGeometrySchema.shape.source,
+  geometrySource: z.enum(["glb-accessors:v1", "procedural-geometry:v2"]),
   localBounds: Bounds3Schema,
   bounds: Bounds3Schema,
   floorClearance: z.number(),
@@ -186,7 +424,18 @@ export const SpatialObjectFactSchema = z.object({
 });
 
 export const SpatialIssueSchema = z.object({
-  category: z.enum(["framing", "intersection", "floating", "scale"]),
+  category: z.enum([
+    "framing",
+    "intersection",
+    "floating",
+    "scale",
+    "continuity",
+    "contact",
+    "containment",
+    "dependency",
+    "visibility",
+    "performance",
+  ]),
   severity: z.enum(["info", "warning", "error"]),
   objectIds: z.array(z.string()).max(4),
   evidence: z.string().min(1),
@@ -234,9 +483,48 @@ export const QaPatchSchema = z.discriminatedUnion("kind", [
     description: z.string().min(1),
     parts: z.array(AssetPartSchema).min(1).max(16),
   }),
+  z.object({
+    kind: z.literal("procedural-node"),
+    nodeId: SceneEntityIdSchema,
+    node: ProceduralNodeSchema,
+  }),
+  z.object({
+    kind: z.literal("procedural-landmark"),
+    landmarkId: SceneEntityIdSchema,
+    position: Vec3Schema,
+  }),
   z.object({ kind: z.literal("none") }),
 ]);
 export type QaPatch = z.infer<typeof QaPatchSchema>;
+
+export const QualityAssessmentSchema = z.object({
+  recognizabilityScore: z.number().min(0).max(1),
+  domainFidelityScore: z.number().min(0).max(1),
+  visualQualityScore: z.number().min(0).max(1),
+  constructionCompletenessScore: z.number().min(0).max(1),
+  confidence: z.number().min(0).max(1),
+  failedCriteria: z.array(z.string().min(1).max(500)).max(12),
+  strengths: z.array(z.string().min(1).max(500)).max(8),
+  recommendedAction: z.enum(["pass", "direct-fix", "targeted-research", "partial-replan"]),
+  targetStudyIds: z.array(SceneEntityIdSchema).max(8),
+  researchQuestions: z.array(z.string().min(1).max(500)).max(8),
+  rationale: z.string().min(1).max(1500),
+});
+export type QualityAssessment = z.infer<typeof QualityAssessmentSchema>;
+
+const LegacyQualityAssessment = {
+  recognizabilityScore: 1,
+  domainFidelityScore: 1,
+  visualQualityScore: 1,
+  constructionCompletenessScore: 1,
+  confidence: 0.5,
+  failedCriteria: [],
+  strengths: [],
+  recommendedAction: "pass" as const,
+  targetStudyIds: [],
+  researchQuestions: [],
+  rationale: "Legacy inspection without scored quality evidence.",
+};
 
 export const InspectionSchema = z.object({
   verdict: z.enum(["pass", "fix"]),
@@ -251,12 +539,87 @@ export const InspectionSchema = z.object({
     "lighting",
     "label",
     "composition",
+    "continuity",
+    "containment",
+    "contact",
+    "performance",
   ]),
   issue: z.string(),
   evidence: z.string(),
   patch: QaPatchSchema,
+  assessment: QualityAssessmentSchema.default(LegacyQualityAssessment),
+  targetId: z.string().optional(),
+  stateId: z.string().optional(),
+  viewId: z.string().optional(),
 });
 export type Inspection = z.infer<typeof InspectionSchema>;
+
+export const QaTargetSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  stateId: z.string().optional(),
+  viewId: z.string().optional(),
+});
+export type QaTarget = z.infer<typeof QaTargetSchema>;
+
+export const QualitySupervisorStatusSchema = z.enum([
+  "running",
+  "complete",
+  "time-exhausted",
+  "action-exhausted",
+  "api-exhausted",
+]);
+
+export const QaCoverageSchema = z.object({
+  sceneRevision: z.number().int().positive(),
+  requiredTargets: z.array(QaTargetSchema).min(1),
+  passedTargetIds: z.array(z.string()),
+  unresolvedTargetIds: z.array(z.string()),
+  refinements: z.number().int().nonnegative(),
+  complete: z.boolean(),
+  qualityGate: z.object({
+    recognizabilityThreshold: z.number().min(0).max(1),
+    domainFidelityThreshold: z.number().min(0).max(1),
+    visualQualityThreshold: z.number().min(0).max(1),
+    constructionCompletenessThreshold: z.number().min(0).max(1),
+    finalAssessment: QualityAssessmentSchema,
+    hardSpatialErrors: z.number().int().nonnegative(),
+    browserErrors: z.number().int().nonnegative(),
+    passed: z.boolean(),
+  }).optional(),
+  supervisorStatus: QualitySupervisorStatusSchema.optional(),
+  generatedAt: z.iso.datetime(),
+});
+export type QaCoverage = z.infer<typeof QaCoverageSchema>;
+
+export const QualitySupervisorStateSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  projectId: z.string().min(1),
+  startedAt: z.iso.datetime(),
+  deadlineAt: z.iso.datetime(),
+  status: QualitySupervisorStatusSchema,
+  attempt: z.number().int().nonnegative(),
+  inspections: z.number().int().nonnegative(),
+  refinements: z.number().int().nonnegative(),
+  targetedResearchRounds: z.number().int().nonnegative(),
+  replans: z.number().int().nonnegative(),
+  logicalAiCalls: z.number().int().nonnegative(),
+  currentRevision: z.number().int().positive(),
+  currentTargetId: z.string().min(1).optional(),
+  passedTargetIds: z.array(z.string()),
+  bestScores: z.object({
+    recognizability: z.number().min(0).max(1),
+    domainFidelity: z.number().min(0).max(1),
+    visualQuality: z.number().min(0).max(1),
+    constructionCompleteness: z.number().min(0).max(1),
+  }),
+  recentRepairFingerprints: z.array(z.string().length(64)).max(24),
+  recentQualityScores: z.array(z.number().min(0).max(1)).max(24),
+  lastProgressAt: z.iso.datetime(),
+  lastRecoveryReason: z.string().max(2000).default(""),
+  updatedAt: z.iso.datetime(),
+});
+export type QualitySupervisorState = z.infer<typeof QualitySupervisorStateSchema>;
 
 export const WorkflowStageSchema = z.enum([
   "created",
@@ -275,6 +638,7 @@ export const WorkflowStageSchema = z.enum([
   "refining",
   "rendering_final",
   "awaiting_feedback",
+  "awaiting_quality",
   "resumed",
   "completed",
   "failed",

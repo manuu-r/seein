@@ -1,6 +1,6 @@
 # SeeIn Local Core
 
-SeeIn turns a concept prompt into a reusable interactive 3D scene through a resumable backend agent graph. It clarifies consequential intent, runs three grounded evidence searches plus one reference-image search in parallel, exposes an evidence-readiness checkpoint, reuses or generates measured assets, renders and visually refines the scene, then learns from explicit user feedback. The browser is only a renderer and typed input surface.
+SeeIn turns a surgeon’s anatomy or procedure prompt into an evidence-grounded interactive 3D medical visualization through a resumable backend agent graph. It clarifies anatomy, laterality, approach, and teaching intent; runs three grounded medical evidence searches plus one anatomical reference-image search in parallel; exposes an evidence-readiness checkpoint; retrieves reusable procedural structures and GLBs; constructs the anatomy; then sends every required operative-view render to Gemini for multimodal inspection and correction at one accepted revision. The browser is only a renderer and typed input surface.
 
 > Status: working local MVP. The deterministic AI provider is intended for offline development and CI; the production path uses Gemini while all other workflow services remain local.
 
@@ -11,9 +11,11 @@ SeeIn turns a concept prompt into a reusable interactive 3D scene through a resu
 - ClickHouse, Blender, Qwen-MM-Plugins, Chromium, storage, and orchestration run locally.
 - Every request gets an isolated project folder under `data/projects`.
 - Large artifacts live on disk; ClickHouse indexes paths, hashes, lineage, and reusable metadata.
-- The workflow has a configurable 1–4 inspection iterations; the default of 2 permits one correction followed by mandatory verification of the corrected render.
-- Spatial evidence is derived from the exact GLB's mesh accessors and carries its SHA-256 provenance; planner-declared dimensions are never used as measured geometry.
-- Gemini returns schema-validated data and never writes renderer source code.
+- The autonomous quality supervisor uses a 30-minute default wall-clock budget with 64 inspection/refinement slots (63 repair actions), a separate logical AI-call budget, transient-provider retries, and up to 24 required state/view targets. Longer unattended sessions, such as four hours, are enabled explicitly with `WORKFLOW_MAX_RUNTIME_MINUTES=240`. A correction invalidates prior passes, so all targets must pass again at the same revision.
+- Every Gemini inspection returns recognizability, domain-fidelity, visual-quality, construction-completeness, and confidence scores. The backend—not the model's verdict alone—enforces the thresholds and can escalate a stalled local patch into targeted grounded research and a reconstruction replan.
+- Each inspection sends Gemini the actual target-view PNG, the original request, approved intent, current research brief, relevant object studies, measured scene evidence, and up to four bounded reference images. Corrections must address the mismatch between that visual evidence and the approved target—not a generic notion of attractiveness.
+- Spatial evidence comes from exact GLB mesh accessors or the shared procedural geometry builder used by both backend and renderer. Planner-declared asset dimensions are never used as measured geometry.
+- Gemini returns schema-validated plans and patches and never writes renderer source code. Procedural construction is a declarative program of coordinate frames, landmarks, materials, nodes, views, states, and invariants.
 - Gemini performs semantic work inside typed nodes; deterministic backend guards choose graph edges and bounds.
 - All scene content is mounted below one Three.js `SceneRoot` group.
 
@@ -34,7 +36,7 @@ Create a run with:
 ```bash
 curl -X POST http://localhost:8787/api/projects \
   -H 'content-type: application/json' \
-  -d '{"prompt":"A compact medieval blacksmith workshop with labeled tools"}'
+  -d '{"prompt":"Right hepatic hilum anatomy for laparoscopic cholecystectomy, including Calot’s triangle and structures at risk"}'
 ```
 
 Open the returned `viewerUrl`. The guided renderer shows the backend's clarification questions, research checks, generation progress, scene states, and final feedback controls.
@@ -42,7 +44,7 @@ Open the returned `viewerUrl`. The guided renderer shows the backend's clarifica
 For an offline deterministic smoke run that does not require Gemini, Blender, ClickHouse, or Chromium:
 
 ```bash
-npm run demo -- "A compact medieval blacksmith workshop"
+npm run demo -- "Endoscopic endonasal transsphenoidal approach with carotid and optic relationships"
 ```
 
 ## Documentation
@@ -68,11 +70,14 @@ npm run demo -- "A compact medieval blacksmith workshop"
 - [x] Exact and compatible-asset reuse with checksum and measured-geometry validation
 - [x] Bulk asset retrieval and one-call Blender batch generation
 - [x] Declarative scene assembly and a bounded allowlisted refinement loop
-- [x] GLB-measured spatial evidence with asset-hash provenance for support, collision, scale, and framing
+- [x] Backend-authored procedural primitives, tapered tubes, extrusions, lathes, instancing, shared landmarks, hierarchy, units, views, and invariants
+- [x] Required state × view QA matrix with pass invalidation after every patch and non-completable `quality-blocked` checkpoints
+- [x] Four-hour durable self-healing supervisor with scored acceptance gates, cycle/plateau detection, targeted re-research, partial replanning, retries, and ClickHouse checkpoints
+- [x] GLB- and shared-builder-measured spatial evidence with hash provenance for support, collision, scale, framing, continuity, contact, containment, visibility, and performance
 - [x] Bounded single-asset primitive-recipe regeneration for obvious geometry failures
-- [x] Generic Three.js renderer with a common root, lighting, orbit controls, labels, highlights, and timed states
+- [x] Display-only Three.js anatomy renderer with a common root, lighting, orbit controls, labels, highlights, operative views, and timed procedure states
 - [x] Persistent Playwright browser, content-addressed render reuse, and renderer-readiness protocol
-- [x] ClickHouse-indexed project status, latest scene, events, phase caches, and spatial facts
+- [x] ClickHouse-indexed project status, latest scene, events, phase caches, spatial facts, procedural components, procedure states, and per-target QA
 - [x] Backend API, run status, events, and reruns
 - [x] Resumable clarification → parallel research → readiness approval → generation → feedback graph
 - [x] Guided display-only renderer for graph progress, approvals, and revision feedback
