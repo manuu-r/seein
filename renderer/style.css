@@ -393,6 +393,24 @@ button.act:active:not(:disabled) { transform: translateY(1px); }
 .checkpoints strong { font-size: 12px; font-weight: 550; overflow-wrap: anywhere; }
 .checkpoints span { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--bone-400); font-size: 11px; line-height: 1.4; }
 
+.checkpoint-fold { gap: 0; }
+.checkpoint-fold > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  color: var(--bone-300);
+  list-style: none;
+  cursor: pointer;
+}
+.checkpoint-fold > summary::-webkit-details-marker { display: none; }
+.checkpoint-fold > summary strong { font-size: 12.5px; font-weight: 500; }
+.checkpoint-fold > summary span { margin-left: auto; color: var(--bone-400); font-family: var(--mono); font-size: 9.5px; }
+.checkpoint-fold > summary::after { content: "+"; color: var(--bone-400); font-family: var(--mono); }
+.checkpoint-fold[open] > summary::after { content: "−"; }
+.checkpoint-fold__body { display: grid; gap: 12px; padding: 2px 0 4px; }
+
 .attribution { color: var(--bone-400); font-size: 11.5px; }
 .attribution summary { cursor: pointer; padding: 6px 0; }
 .attribution iframe { width: 100%; min-height: 72px; margin-top: 8px; border: 1px solid var(--ink-300); border-radius: var(--r); background: #fff; }
@@ -782,6 +800,17 @@ button.act:active:not(:disabled) { transform: translateY(1px); }
 .launcher__run { padding: 15px 0; }
 
 /* Workflow: a quiet side rail on desktop and a compact status dock on mobile. */
+.atlas-frame {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transition: left var(--dur) var(--ease), bottom var(--dur) var(--ease);
+}
+#viewport[data-console-collapsed="false"] .atlas-frame {
+  left: var(--rail);
+  width: calc(100% - var(--rail));
+}
 .console { background: var(--ink-glass); backdrop-filter: blur(22px) saturate(120%); }
 .console__bar { min-height: 58px; padding: 12px 16px; }
 .console__home { display: inline-flex; align-items: center; gap: 9px; color: var(--bone-300); }
@@ -812,6 +841,43 @@ button.act:active:not(:disabled) { transform: translateY(1px); }
 .console[data-collapsed="true"] .console__bar { padding-inline: 14px; }
 .console[data-collapsed="true"] .console__toggle { font-size: 0; }
 .console[data-collapsed="true"] .console__toggle::before { content: ">"; font-family: var(--mono); font-size: 13px; }
+
+@media (min-width: 861px) {
+  .console[data-collapsed="true"] {
+    width: 0;
+    overflow: visible;
+    border: 0;
+    background: transparent;
+    backdrop-filter: none;
+  }
+  .console[data-collapsed="true"] .console__bar {
+    position: fixed;
+    top: 50%;
+    left: 10px;
+    display: flex;
+    flex-direction: column;
+    width: 42px;
+    min-height: 0;
+    padding: 6px;
+    border: 1px solid var(--rule-strong);
+    border-radius: 999px;
+    background: var(--ink-glass);
+    box-shadow: 0 12px 34px rgb(0 0 0 / 24%);
+    transform: translateY(-50%);
+    backdrop-filter: blur(18px);
+  }
+  .console[data-collapsed="true"] .console__tools { flex-direction: column; gap: 2px; }
+  .console[data-collapsed="true"] .console__tools > .console__dossier {
+    display: inline-flex;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    font-size: 0;
+  }
+  .console[data-collapsed="true"] .console__dossier-dot { width: 7px; height: 7px; }
+  .console[data-collapsed="true"] .console__toggle { width: 28px; height: 28px; padding: 0; }
+}
 
 /* Dossier: a deep evidence library, closed until explicitly opened. */
 .has-dossier { overflow: hidden; }
@@ -961,6 +1027,13 @@ button.act:active:not(:disabled) { transform: translateY(1px); }
   .launcher__recent { margin-top: -10px; }
 
   .console { height: min(48dvh, 480px); border-top-color: var(--rule-strong); border-radius: 14px 14px 0 0; box-shadow: 0 -24px 70px rgb(0 0 0 / 25%); }
+  .atlas-frame {
+    inset: 0 auto auto 0;
+    width: 100%;
+    height: calc(100dvh - min(48dvh, 480px));
+  }
+  #viewport[data-console-collapsed="false"] .atlas-frame { left: 0; width: 100%; }
+  #viewport[data-console-collapsed="true"] .atlas-frame { height: calc(100dvh - 60px); }
   .console[data-collapsed="true"] { height: 60px; }
   .console[data-collapsed="true"] .console__body { display: none; }
   .console[data-collapsed="true"] .console__bar { min-height: 60px; padding: 9px 12px; }

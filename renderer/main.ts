@@ -181,9 +181,10 @@ let restartPolling: (() => void) | null = null;
 let dossierReturnFocus: HTMLElement | null = null;
 
 const LAUNCHER_EXAMPLES = [
-  "Right hepatic hilum anatomy for laparoscopic cholecystectomy, including Calot’s triangle and structures at risk",
-  "Endoscopic endonasal transsphenoidal approach to the pituitary with carotid and optic relationships",
-  "Microsurgical clipping view of a middle cerebral artery bifurcation aneurysm with perforators preserved",
+  "Laparoscopic cholecystectomy at the right hepatic hilum, including Calot’s triangle and structures at risk",
+  "Low anterior resection pelvic dissection, showing the rectum, urinary bladder, pelvic peritoneal reflection, and mesorectal plane",
+  "Thoracic anatomy for a left lower lobectomy, showing the left lung, heart, tracheobronchial tree, and diaphragm",
+  "Open right inguinal hernia repair showing the deep inguinal ring, inferior epigastric vessels, vas deferens, and iliopubic tract",
 ];
 
 
@@ -420,15 +421,13 @@ async function renderAtlasModule(manifest: Manifest): Promise<void> {
   if (viewId) moduleUrl.searchParams.set("view", viewId);
 
   const frame = document.createElement("iframe");
+  frame.className = "atlas-frame";
   frame.title = manifest.title;
   frame.src = moduleUrl.toString();
-  frame.style.position = "fixed";
-  frame.style.inset = "0";
-  frame.style.width = "100%";
-  frame.style.height = "100%";
   frame.style.border = "0";
   frame.style.background = "#082a2e";
   frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
+  frame.addEventListener("load", () => installEmbeddedAtlasCompatibility(frame));
   viewport.replaceChildren(frame);
   status.textContent = "Loading generated surgical atlas module…";
 
@@ -439,33 +438,46 @@ async function renderAtlasModule(manifest: Manifest): Promise<void> {
     // on a cold page even though the scene is healthy, so reserve enough time
     // for the child to report real frame stability.
     const deadline = Date.now() + 50_000;
+    let settled = false;
+    const finish = (childState?: Window["__SEEIN_RENDER_STATE__"], childErrors: string[] = []): void => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("message", onMessage);
+      window.__SEEIN_ERRORS__?.push(...childErrors);
+      if (window.__SEEIN_RENDER_STATE__) {
+        window.__SEEIN_RENDER_STATE__ = childState
+          ? { ...childState }
+          : {
+              assetsLoaded: true,
+              moduleCompiled: true,
+              cameraSettled: true,
+              stableFrames: 3,
+              stateId: stateId ?? "",
+              viewId: viewId ?? "",
+            };
+      }
+      resolve();
+    };
+    const onMessage = (event: MessageEvent): void => {
+      if (event.source !== frame.contentWindow) return;
+      if ((event.data as { type?: string } | null)?.type === "seein-module-ready") finish();
+    };
+    window.addEventListener("message", onMessage);
     const poll = () => {
+      if (settled) return;
       try {
         const child = frame.contentWindow;
         if (child?.__SEEIN_READY__) {
-          const childState = child.__SEEIN_RENDER_STATE__;
-          const childErrors = child.__SEEIN_ERRORS__ ?? [];
-          window.__SEEIN_ERRORS__?.push(...childErrors);
-          if (window.__SEEIN_RENDER_STATE__) {
-            window.__SEEIN_RENDER_STATE__ = childState
-              ? { ...childState }
-              : {
-                  assetsLoaded: true,
-                  moduleCompiled: true,
-                  cameraSettled: true,
-                  stableFrames: 3,
-                  stateId: stateId ?? "",
-                  viewId: viewId ?? "",
-                };
-          }
-          resolve();
+          finish(child.__SEEIN_RENDER_STATE__, child.__SEEIN_ERRORS__ ?? []);
           return;
         }
-      } catch (error) {
-        reject(error);
-        return;
+      } catch {
+        // Absolute artifact URLs can use localhost while the shell is opened at
+        // 127.0.0.1. The module's postMessage readiness signal works across that
+        // origin boundary, so keep waiting instead of treating it as a scene error.
       }
       if (Date.now() >= deadline) {
+        window.removeEventListener("message", onMessage);
         reject(new Error("Generated surgical module did not reach render readiness within 50 seconds"));
         return;
       }
@@ -478,7 +490,45 @@ async function renderAtlasModule(manifest: Manifest): Promise<void> {
   status.textContent = window.__SEEIN_ERRORS__?.length
     ? `Generated module rendered with ${window.__SEEIN_ERRORS__.length} browser error(s)`
     : `${manifest.module.definition.steps.length} surgical states · live generated module`;
+  status.hidden = true;
   window.__SEEIN_READY__ = true;
+}
+
+/**
+ * Older compiled modules contain the pre-responsive atlas chrome in their bundle.
+ * When they are same-origin, layer in the mobile-safe rules so saved runs improve
+ * immediately without rewriting their immutable scene artifact.
+ */
+function installEmbeddedAtlasCompatibility(frame: HTMLIFrameElement): void {
+  try {
+    const document = frame.contentDocument;
+    if (!document || document.getElementById("seein-embedded-layout")) return;
+    const style = document.createElement("style");
+    style.id = "seein-embedded-layout";
+    style.textContent = `
+      *, *::before, *::after { box-sizing: border-box; }
+      #root > main > header > div:first-child { max-width: min(720px, calc(100% - 190px)) !important; }
+      @media (max-width: 700px) {
+        #root > main > header { inset: 56px 12px auto 12px !important; }
+        #root > main > header > div { width: 100% !important; max-width: none !important; padding: 9px 11px !important; }
+        #root > main > header h1 { display: -webkit-box; overflow: hidden; margin-top: 3px !important; font-size: 15px !important; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+        #root > main > header h1 + div { display: none !important; }
+        #root > main > aside { right: 12px !important; bottom: 68px !important; left: 12px !important; width: auto !important; padding: 10px 12px !important; }
+        #root > main > aside h2 { margin-bottom: 0 !important; font-size: 14px !important; }
+        #root > main > aside p { display: none !important; }
+        #root > main > nav { right: 12px !important; bottom: 12px !important; left: 12px !important; width: auto !important; flex-direction: row !important; overflow-x: auto; scrollbar-width: none; }
+        #root > main > nav::-webkit-scrollbar { display: none; }
+        #root > main > nav button { flex: 0 0 auto; white-space: nowrap; }
+        #root > main > nav + div { top: 12px !important; right: 12px !important; }
+        #root > main > nav + div button { padding: 7px 9px !important; font-size: 10px !important; }
+        #root > main > nav + div + div { top: 20px !important; left: 12px !important; transform: none !important; font-size: 8px !important; }
+        #root > main > nav + div + div + div { display: none !important; }
+      }
+    `;
+    document.head.append(style);
+  } catch {
+    // Cross-origin modules carry their own responsive host styles when newly built.
+  }
 }
 
 interface ProjectEvent {
@@ -773,6 +823,7 @@ function wireConsoleToggle(): void {
   workflowPanel.dataset.wired = "true";
   const setCollapsed = (collapsed: boolean): void => {
     workflowPanel.dataset.collapsed = String(collapsed);
+    viewport.dataset.consoleCollapsed = String(collapsed);
     consoleToggle.textContent = collapsed ? "Show" : "Hide";
     consoleToggle.setAttribute("aria-expanded", String(!collapsed));
     consolePeek.setAttribute("aria-expanded", String(!collapsed));
@@ -1527,7 +1578,7 @@ function renderWorkflowAction(
   }
 
   if (state.status !== "running") {
-    void renderCheckpointHistory(projectId, refresh);
+    void renderCheckpointHistory(projectId, refresh, state.status === "failed");
   }
 
   if (state.currentNode === "await-clarification" && state.clarification) {
@@ -1657,7 +1708,11 @@ function renderWorkflowAction(
   }
 }
 
-async function renderCheckpointHistory(projectId: string, refresh: () => Promise<void>): Promise<void> {
+async function renderCheckpointHistory(
+  projectId: string,
+  refresh: () => Promise<void>,
+  expanded: boolean,
+): Promise<void> {
   let checkpoints: CheckpointSummary[];
   try {
     const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/checkpoints`, { cache: "no-store" });
@@ -1669,18 +1724,25 @@ async function renderCheckpointHistory(projectId: string, refresh: () => Promise
   const resumable = checkpoints.filter((checkpoint) => checkpoint.resumable);
   if (resumable.length === 0) return;
 
-  const card = document.createElement("div");
-  card.className = "card";
-  const heading = document.createElement("h2");
-  heading.textContent = "Rewind to a checkpoint";
-  card.append(heading);
+  const card = document.createElement("details");
+  card.className = "card checkpoint-fold";
+  card.open = expanded;
+  const heading = document.createElement("summary");
+  const headingLabel = document.createElement("strong");
+  headingLabel.textContent = expanded ? "Choose a recovery point" : "Rewind or restore";
+  const headingMeta = document.createElement("span");
+  headingMeta.textContent = `${resumable.length} checkpoints`;
+  heading.append(headingLabel, headingMeta);
+  const body = document.createElement("div");
+  body.className = "checkpoint-fold__body";
+  card.append(heading, body);
 
   const fresh = document.createElement("label");
   fresh.className = "field__why";
   const freshInput = document.createElement("input");
   freshInput.type = "checkbox";
   fresh.append(freshInput, document.createTextNode("Ignore cached steps (regenerate from here)"));
-  card.append(fresh);
+  body.append(fresh);
 
   const list = document.createElement("ul");
   list.className = "checkpoints";
@@ -1707,7 +1769,7 @@ async function renderCheckpointHistory(projectId: string, refresh: () => Promise
     item.append(button);
     list.append(item);
   }
-  card.append(list);
+  body.append(list);
   workflowAction.append(card);
 }
 

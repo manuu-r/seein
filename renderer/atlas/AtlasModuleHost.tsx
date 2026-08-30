@@ -114,6 +114,7 @@ export function AtlasModuleHost({
   const [transparentPatient, setTransparentPatient] = useState(
     definition.steps.find((step) => step.id === requestedStep)?.transparentPatient ?? true,
   );
+  const [showStepDetails, setShowStepDetails] = useState(false);
   const [sceneMounted, setSceneMounted] = useState(false);
   const markSceneMounted = useMemo(() => () => setSceneMounted(true), []);
   const step = definition.steps.find((candidate) => candidate.id === stepId) ?? definition.steps[0]!;
@@ -124,10 +125,12 @@ export function AtlasModuleHost({
     setStepId(next.id);
     setShowLabels(qaMode ? false : next.showLabels);
     setTransparentPatient(next.transparentPatient);
+    setShowStepDetails(false);
   };
 
   return (
-    <main style={{ position: "fixed", inset: 0, overflow: "hidden", background: definition.background, color: "#edf7f5", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" }}>
+    <main className="atlas-shell" style={{ background: definition.background }}>
+      <style>{ATLAS_UI_STYLES}</style>
       <Canvas
         shadows
         dpr={[1, 1.5]}
@@ -154,48 +157,175 @@ export function AtlasModuleHost({
         <ReadinessProbe sceneMounted={sceneMounted} />
       </Canvas>
 
-      <header style={{ position: "absolute", inset: "18px 20px auto 20px", display: "flex", gap: 16, alignItems: "flex-start", pointerEvents: "none" }}>
-        <div style={{ maxWidth: 720, padding: "11px 14px", border: "1px solid rgba(180,226,218,.2)", borderRadius: 12, background: "rgba(5,18,21,.78)", backdropFilter: "blur(12px)" }}>
-          <div style={{ color: "#7fd7cb", fontSize: 10, fontWeight: 800, letterSpacing: ".16em", textTransform: "uppercase" }}>Surgical atlas · {definition.laterality}</div>
-          <h1 style={{ margin: "4px 0 2px", fontSize: 18, lineHeight: 1.2 }}>{definition.title}</h1>
-          <div style={{ color: "#aec6c2", fontSize: 12 }}>{definition.subtitle}</div>
+      <header className="atlas-head">
+        <div className="atlas-head__card">
+          <div className="atlas-kicker">Surgical atlas · {definition.laterality}</div>
+          <h1>{definition.title}</h1>
+          <p>{definition.subtitle}</p>
         </div>
       </header>
 
-      <aside style={{ position: "absolute", left: 20, bottom: 20, width: 310, padding: 14, borderRadius: 14, background: "rgba(5,18,21,.84)", border: "1px solid rgba(180,226,218,.2)", backdropFilter: "blur(14px)" }}>
-        <div style={{ color: "#7fd7cb", fontSize: 10, fontWeight: 800, letterSpacing: ".14em", textTransform: "uppercase" }}>{step.shortLabel}</div>
-        <h2 style={{ margin: "5px 0", fontSize: 16 }}>{step.title}</h2>
-        <p style={{ margin: 0, color: "#bdd0cd", fontSize: 12, lineHeight: 1.45 }}>{step.description}</p>
-        <p style={{ margin: "8px 0 0", color: "#f3d8b9", fontSize: 11, lineHeight: 1.4 }}>{step.teachingFocus}</p>
+      <aside className="atlas-step-card" data-expanded={String(showStepDetails)}>
+        <div className="atlas-step-card__head">
+          <div>
+            <div className="atlas-kicker">{step.shortLabel}</div>
+            <h2>{step.title}</h2>
+          </div>
+          <button
+            type="button"
+            className="atlas-step-card__toggle"
+            aria-expanded={showStepDetails}
+            onClick={() => setShowStepDetails((value) => !value)}
+          >
+            {showStepDetails ? "Less" : "Details"}
+          </button>
+        </div>
+        <div className="atlas-step-card__body">
+          <p>{step.description}</p>
+          <p>{step.teachingFocus}</p>
+        </div>
       </aside>
 
-      <nav style={{ position: "absolute", right: 20, bottom: 20, display: "flex", flexDirection: "column", gap: 6, width: 220 }} aria-label="Surgical sequence">
+      <nav className="atlas-sequence" aria-label="Surgical sequence">
         {definition.steps.map((candidate, index) => (
-          <button key={candidate.id} type="button" onClick={() => chooseStep(candidate.id)} style={{ cursor: "pointer", color: candidate.id === stepId ? "#f3fbf9" : "#a9c0bc", textAlign: "left", padding: "8px 10px", borderRadius: 9, border: candidate.id === stepId ? "1px solid rgba(113,216,202,.55)" : "1px solid rgba(180,226,218,.14)", background: candidate.id === stepId ? "rgba(25,102,96,.88)" : "rgba(5,18,21,.78)", backdropFilter: "blur(10px)" }}>
-            <span style={{ display: "inline-block", width: 24, color: "#7fd7cb", fontSize: 10 }}>{String(index + 1).padStart(2, "0")}</span>
-            <span style={{ fontSize: 11, fontWeight: 700 }}>{candidate.shortLabel}</span>
+          <button
+            key={candidate.id}
+            type="button"
+            className="atlas-sequence__item"
+            aria-current={candidate.id === stepId ? "step" : undefined}
+            onClick={() => chooseStep(candidate.id)}
+          >
+            <span>{String(index + 1).padStart(2, "0")}</span>
+            <strong>{candidate.shortLabel}</strong>
           </button>
         ))}
       </nav>
 
-      <div style={{ position: "absolute", right: 20, top: 20, display: "flex", gap: 8 }}>
-        <button type="button" onClick={() => setTransparentPatient((value) => !value)} style={toolButtonStyle}>{transparentPatient ? "Cutaway on" : "Cutaway off"}</button>
-        <button type="button" onClick={() => setShowLabels((value) => !value)} style={toolButtonStyle}>{showLabels ? "Labels on" : "Labels off"}</button>
+      <div className="atlas-tools">
+        <button type="button" aria-pressed={transparentPatient} onClick={() => setTransparentPatient((value) => !value)}>{transparentPatient ? "Cutaway on" : "Cutaway off"}</button>
+        <button type="button" aria-pressed={showLabels} onClick={() => setShowLabels((value) => !value)}>{showLabels ? "Labels on" : "Labels off"}</button>
       </div>
 
-      <div style={{ position: "absolute", left: "50%", top: 18, transform: "translateX(-50%)", color: "#afd0ca", fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", pointerEvents: "none" }}>Cephalad ↑</div>
-      <div style={{ position: "absolute", right: 20, top: "50%", transform: "rotate(90deg) translateX(50%)", transformOrigin: "right top", color: "#afd0ca", fontSize: 10, letterSpacing: ".12em", textTransform: "uppercase", pointerEvents: "none" }}>Patient left</div>
+      <div className="atlas-orientation atlas-orientation--cephalad">Cephalad ↑</div>
+      <div className="atlas-orientation atlas-orientation--patient">Patient left</div>
     </main>
   );
 }
 
-const toolButtonStyle: React.CSSProperties = {
-  cursor: "pointer",
-  color: "#dceae7",
-  background: "rgba(5,18,21,.78)",
-  border: "1px solid rgba(180,226,218,.2)",
-  borderRadius: 999,
-  padding: "8px 11px",
-  fontSize: 11,
-  backdropFilter: "blur(10px)",
-};
+const ATLAS_UI_STYLES = `
+  .atlas-shell, .atlas-shell * { box-sizing: border-box; }
+  .atlas-shell {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    color: #edf7f5;
+    font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  }
+  .atlas-head { position: absolute; inset: 18px 20px auto; display: flex; align-items: flex-start; pointer-events: none; }
+  .atlas-head__card {
+    width: min(720px, calc(100% - 270px));
+    padding: 11px 14px;
+    border: 1px solid rgba(180, 226, 218, .2);
+    border-radius: 12px;
+    background: rgba(5, 18, 21, .78);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .12);
+    backdrop-filter: blur(12px);
+  }
+  .atlas-kicker { color: #7fd7cb; font-size: 10px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+  .atlas-head h1 { margin: 4px 0 2px; font-size: 18px; line-height: 1.2; }
+  .atlas-head p { margin: 0; color: #aec6c2; font-size: 12px; line-height: 1.4; }
+  .atlas-step-card {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    width: 330px;
+    padding: 14px;
+    border: 1px solid rgba(180, 226, 218, .2);
+    border-radius: 14px;
+    background: rgba(5, 18, 21, .84);
+    box-shadow: 0 16px 38px rgba(0, 0, 0, .14);
+    backdrop-filter: blur(14px);
+  }
+  .atlas-step-card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .atlas-step-card h2 { margin: 5px 0 0; font-size: 16px; line-height: 1.2; }
+  .atlas-step-card__body p { margin: 7px 0 0; color: #bdd0cd; font-size: 12px; line-height: 1.45; }
+  .atlas-step-card__body p:last-child { color: #f3d8b9; font-size: 11px; line-height: 1.4; }
+  .atlas-step-card__toggle { display: none; }
+  .atlas-sequence { position: absolute; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 6px; width: 220px; }
+  .atlas-sequence__item {
+    padding: 8px 10px;
+    border: 1px solid rgba(180, 226, 218, .14);
+    border-radius: 9px;
+    color: #a9c0bc;
+    background: rgba(5, 18, 21, .78);
+    text-align: left;
+    cursor: pointer;
+    backdrop-filter: blur(10px);
+  }
+  .atlas-sequence__item:hover { border-color: rgba(180, 226, 218, .34); color: #edf7f5; }
+  .atlas-sequence__item[aria-current="step"] { border-color: rgba(113, 216, 202, .55); color: #f3fbf9; background: rgba(25, 102, 96, .88); }
+  .atlas-sequence__item span { display: inline-block; width: 24px; color: #7fd7cb; font-size: 10px; font-weight: 500; }
+  .atlas-sequence__item strong { font-size: 11px; font-weight: 700; }
+  .atlas-tools { position: absolute; top: 20px; right: 20px; display: flex; gap: 8px; }
+  .atlas-tools button, .atlas-step-card__toggle {
+    padding: 8px 11px;
+    border: 1px solid rgba(180, 226, 218, .2);
+    border-radius: 999px;
+    color: #dceae7;
+    background: rgba(5, 18, 21, .78);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    backdrop-filter: blur(10px);
+  }
+  .atlas-tools button:hover, .atlas-step-card__toggle:hover { border-color: rgba(127, 215, 203, .6); }
+  .atlas-orientation { position: absolute; color: #afd0ca; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; pointer-events: none; }
+  .atlas-orientation--cephalad { top: 18px; left: 50%; transform: translateX(-50%); }
+  .atlas-orientation--patient { top: 50%; right: 20px; transform: rotate(90deg) translateX(50%); transform-origin: right top; }
+
+  @media (max-width: 900px) {
+    .atlas-head__card { width: calc(100% - 250px); }
+    .atlas-head h1 { font-size: 16px; }
+    .atlas-step-card { width: min(310px, calc(100% - 280px)); }
+  }
+
+  @media (max-width: 700px) {
+    .atlas-head { inset: 56px 12px auto; }
+    .atlas-head__card { width: 100%; padding: 9px 11px; }
+    .atlas-head h1 { display: -webkit-box; overflow: hidden; margin-top: 3px; font-size: 15px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+    .atlas-head p { display: none; }
+    .atlas-kicker { font-size: 8px; letter-spacing: .14em; }
+    .atlas-tools { top: 12px; right: 12px; }
+    .atlas-tools button { padding: 7px 9px; font-size: 10px; }
+    .atlas-orientation--cephalad { top: 20px; left: 12px; transform: none; font-size: 8px; }
+    .atlas-orientation--patient { display: none; }
+    .atlas-step-card {
+      right: 12px;
+      bottom: 68px;
+      left: 12px;
+      width: auto;
+      max-height: min(34dvh, 250px);
+      overflow: auto;
+      padding: 10px 12px;
+    }
+    .atlas-step-card h2 { margin-top: 3px; font-size: 14px; }
+    .atlas-step-card__toggle { display: block; flex: none; padding: 6px 9px; font-size: 9px; }
+    .atlas-step-card__body { display: none; }
+    .atlas-step-card[data-expanded="true"] .atlas-step-card__body { display: block; }
+    .atlas-sequence {
+      right: 12px;
+      bottom: 12px;
+      left: 12px;
+      width: auto;
+      flex-direction: row;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .atlas-sequence::-webkit-scrollbar { display: none; }
+    .atlas-sequence__item { flex: 0 0 auto; white-space: nowrap; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .atlas-shell *, .atlas-shell *::before, .atlas-shell *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+  }
+`;
