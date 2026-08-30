@@ -1851,7 +1851,7 @@ export class Orchestrator {
           {
             label: `Render ${target?.label ?? `revision ${scene.revision}`}`,
             provider: this.screenshots.identity,
-            destination: this.viewerUrl(manifest.url, target),
+            destination: this.renderViewerUrl(manifest.url, target),
             action: "Playwright page load + screenshot",
             detail: {
               revision: scene.revision,
@@ -1865,7 +1865,7 @@ export class Orchestrator {
               browserErrors: result.browserErrors,
             }),
           },
-          () => this.screenshots.capture(this.viewerUrl(manifest.url, target), outputPath),
+          () => this.screenshots.capture(this.renderViewerUrl(manifest.url, target), outputPath),
         );
     const artifact = await artifactFromExisting(
       cacheHit ? cached.data.path : capture.path,
@@ -1906,11 +1906,28 @@ export class Orchestrator {
   }
 
   private viewerUrl(manifestUrl: string, target?: QaTarget): string {
-    const query = new URLSearchParams({ manifest: manifestUrl });
+    return this.viewerUrlForBase(manifestUrl, this.config.PUBLIC_BASE_URL, target);
+  }
+
+  private renderViewerUrl(manifestUrl: string, target?: QaTarget): string {
+    return this.viewerUrlForBase(manifestUrl, this.config.RENDER_BASE_URL, target);
+  }
+
+  private viewerUrlForBase(manifestUrl: string, baseUrl: string, target?: QaTarget): string {
+    const query = new URLSearchParams({ manifest: this.rebaseOwnedUrl(manifestUrl, baseUrl) });
     if (target?.stateId) query.set("state", target.stateId);
     if (target?.viewId) query.set("view", target.viewId);
     if (target) query.set("qa", "1");
-    return `${this.config.PUBLIC_BASE_URL.replace(/\/$/, "")}/viewer/?${query.toString()}`;
+    return `${baseUrl.replace(/\/$/, "")}/viewer/?${query.toString()}`;
+  }
+
+  private rebaseOwnedUrl(url: string, baseUrl: string): string {
+    const publicBase = new URL(this.config.PUBLIC_BASE_URL);
+    const candidate = new URL(url);
+    if (candidate.origin !== publicBase.origin) return url;
+
+    const renderBase = new URL(baseUrl);
+    return new URL(`${candidate.pathname}${candidate.search}${candidate.hash}`, renderBase).toString();
   }
 
   private async stage(project: ProjectRecord, stage: WorkflowStage): Promise<ProjectRecord> {

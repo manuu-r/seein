@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y ca-certificates curl gnupg
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" >/etc/apt/sources.list.d/docker.list
+
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /etc/apt/keyrings/google-cloud.gpg
+chmod a+r /etc/apt/keyrings/google-cloud.gpg
+echo "deb [signed-by=/etc/apt/keyrings/google-cloud.gpg] https://packages.cloud.google.com/apt cloud-sdk main" >/etc/apt/sources.list.d/google-cloud-sdk.list
+
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin google-cloud-cli
+
+install -d -m 0755 /opt/seein /var/lib/seein/data /var/lib/seein/clickhouse /run/seein /etc/seein
+gcloud auth configure-docker ${registry_host} --quiet
+
+cat >/etc/seein/config.env <<'EOF'
+PROJECT_ID=${project_id}
+REGISTRY_HOST=${registry_host}
+SEEIN_IMAGE=${registry_path}:latest
+PUBLIC_BASE_URL=https://${app_domain}
+RENDER_BASE_URL=http://127.0.0.1:${app_port}
+EOF
+chmod 0644 /etc/seein/config.env
+
+cat >/opt/seein/docker-compose.prod.yml <<'EOF'
+${compose_file}
+EOF
+
+cat >/usr/local/bin/seein-start <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+set -a
+. /etc/seein/config.env
+set +a
+
+umask 077
+install -d -m 0700 /run/seein
+secrets_file=/run/seein/secrets.env
+{
+  printf 'GEMINI_API_KEY=%s\n' "$(gcloud secrets versions access latest --project="$${PROJECT_ID}" --secret=seein-gemini-api-key)"
+  printf 'FIRECRAWL_API_KEY=%s\n' "$(gcloud secrets versions access latest --project="$${PROJECT_ID}" --secret=seein-firecrawl-api-key)"
+  printf 'CLICKHOUSE_PASSWORD=%s\n' "$(gcloud secrets versions access latest --project="$${PROJECT_ID}" --secret=seein-clickhouse-password)"
+} >"$${secrets_file}"
+chmod 0600 "$${secrets_file}"
+
+set -a
+. "$${secrets_file}"
+set +a
+
+docker compose -f /opt/seein/docker-compose.prod.yml pull
+docker compose -f /opt/seein/docker-compose.prod.yml up -d --remove-orphans
+EOF
+chmod 0750 /usr/local/bin/seein-start
+
+cat >/usr/local/bin/seein-stop <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+set -a
+. /etc/seein/config.env
+set +a
+if [[ -f /run/seein/secrets.env ]]; then
+  set -a
+  . /run/seein/secrets.env
+  set +a
+fi
+docker compose -f /opt/seein/docker-compose.prod.yml down
+EOF
+chmod 0750 /usr/local/bin/seein-stop
+
+cat >/usr/local/bin/seein-deploy <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+tag="$${1:?Usage: seein-deploy <image-tag>}"
+if [[ ! "$${tag}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+  echo "Invalid image tag" >&2
+  exit 2
+fi
+
+sed -i "s|^SEEIN_IMAGE=.*|SEEIN_IMAGE=$${REGISTRY_HOST}/${project_id}/seein/seein-core:$${tag}|" /etc/seein/config.env
+systemctl restart seein
+EOF
+chmod 0750 /usr/local/bin/seein-deploy
+
+cat >/etc/systemd/system/seein.service <<'EOF'
+[Unit]
+Description=SeeIn application stack
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/seein-start
+ExecStop=/usr/local/bin/seein-stop
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable seein.service
+if gcloud secrets versions access latest --project="${project_id}" --secret=seein-gemini-api-key >/dev/null 2>&1 && \
+  gcloud secrets versions access latest --project="${project_id}" --secret=seein-firecrawl-api-key >/dev/null 2>&1 && \
+  gcloud secrets versions access latest --project="${project_id}" --secret=seein-clickhouse-password >/dev/null 2>&1; then
+  systemctl restart seein.service
+fi

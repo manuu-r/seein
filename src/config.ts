@@ -21,6 +21,9 @@ const ConfigSchema = z.object({
   HOST: z.string().default("0.0.0.0"),
   PORT: z.coerce.number().int().positive().default(8787),
   PUBLIC_BASE_URL: z.url().default("http://localhost:8787"),
+  // The browser used for visual QA can use a private loopback address while the
+  // public address sits behind an identity-aware proxy such as Google IAP.
+  RENDER_BASE_URL: z.url().optional(),
   DATA_ROOT: z.string().default("./data"),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
   LOG_FORMAT: z.enum(["pretty", "json"]).default("pretty"),
@@ -78,6 +81,7 @@ export function loadConfig(overrides: NodeJS.ProcessEnv = process.env) {
   return {
     ...config,
     DATA_ROOT: path.resolve(config.DATA_ROOT),
+    RENDER_BASE_URL: config.RENDER_BASE_URL ?? config.PUBLIC_BASE_URL,
     GEMINI_API_KEY: config.GEMINI_API_KEY ?? "",
     FIRECRAWL_API_KEY: config.FIRECRAWL_API_KEY ?? "",
   };

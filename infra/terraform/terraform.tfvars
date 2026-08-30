@@ -1,0 +1,9 @@
+# Live SeeIn deployment settings. This contains no credentials.
+project_id                 = "seein-507115"
+region                     = "asia-south1"
+zone                       = "asia-south1-a"
+machine_type               = "e2-standard-2"
+boot_disk_size_gb          = 100
+app_domain                 = "seein.maybecoded.com"
+enable_iap_backend_ingress = true
+iap_access_group           = "seein-access@googlegroups.com"

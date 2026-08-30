@@ -1,0 +1,52 @@
+name: seein
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: seein
+      CLICKHOUSE_USER: seein
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?ClickHouse password is required}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - /var/lib/seein/clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  core:
+    image: ${SEEIN_IMAGE:?Set SEEIN_IMAGE to an Artifact Registry image tag}
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      - /run/seein/secrets.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8787"
+      NODE_ENV: production
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL}
+      RENDER_BASE_URL: ${RENDER_BASE_URL:-${PUBLIC_BASE_URL}}
+      DATA_ROOT: /data
+      LOG_FORMAT: json
+      LOG_LEVEL: info
+      LOG_HTTP_REQUESTS: "false"
+      CONTEXT_DRIVER: clickhouse
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: seein
+      CLICKHOUSE_USERNAME: seein
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?ClickHouse password is required}
+      PLAYWRIGHT_BROWSERS_PATH: /root/.cache/ms-playwright
+    volumes:
+      - /var/lib/seein/data:/data
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    shm_size: "2gb"

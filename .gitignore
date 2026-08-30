@@ -6,5 +6,7 @@ playwright-report/
 test-results/
 *.log
 .DS_Store
+infra/terraform/.terraform/
+infra/terraform/*.tfplan
 
 reference-projects
