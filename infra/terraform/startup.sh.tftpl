@@ -81,6 +81,10 @@ cat >/usr/local/bin/seein-deploy <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
+set -a
+. /etc/seein/config.env
+set +a
+
 tag="$${1:?Usage: seein-deploy <image-tag>}"
 if [[ ! "$${tag}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
   echo "Invalid image tag" >&2

@@ -1910,11 +1910,22 @@ export class Orchestrator {
   }
 
   private renderViewerUrl(manifestUrl: string, target?: QaTarget): string {
-    return this.viewerUrlForBase(manifestUrl, this.config.RENDER_BASE_URL, target);
+    return this.viewerUrlForBase(manifestUrl, this.config.RENDER_BASE_URL, target, true);
   }
 
-  private viewerUrlForBase(manifestUrl: string, baseUrl: string, target?: QaTarget): string {
+  private viewerUrlForBase(
+    manifestUrl: string,
+    baseUrl: string,
+    target?: QaTarget,
+    usePrivateArtifactBase = false,
+  ): string {
     const query = new URLSearchParams({ manifest: this.rebaseOwnedUrl(manifestUrl, baseUrl) });
+    // Scene manifests intentionally retain public, user-shareable URLs. During
+    // server-side QA the outer viewer is local, so tell it to load generated
+    // module artifacts from the same private base rather than IAP.
+    if (usePrivateArtifactBase && new URL(baseUrl).origin !== new URL(this.config.PUBLIC_BASE_URL).origin) {
+      query.set("artifactBase", baseUrl);
+    }
     if (target?.stateId) query.set("state", target.stateId);
     if (target?.viewId) query.set("view", target.viewId);
     if (target) query.set("qa", "1");

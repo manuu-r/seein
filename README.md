@@ -29,23 +29,55 @@ Stable registration is deliberately separate from morphology. Each prompt produc
 
 ## Run locally
 
-Requirements: Docker, Docker Compose, and a Gemini API key.
+Requirements: Docker, Docker Compose, a Gemini API key, and internet access. The
+workflow calls Gemini live; there is no offline or mock mode.
 
 ```bash
+git clone https://github.com/manuu-r/seein.git
+cd seein
 cp .env.example .env
-# Set GEMINI_API_KEY, then:
+```
+
+Set `GEMINI_API_KEY` in `.env`. To run without downloaded reference images, also
+set `REFERENCE_SEARCH_DRIVER=none`; grounded textual research still runs and no
+Firecrawl key is needed. To exercise the full image-grounded path instead, set
+`FIRECRAWL_API_KEY` and leave the driver at its default.
+
+```bash
 docker compose up --build
 ```
 
-Open http://localhost:8787. ClickHouse migrations run automatically. The worker image contains Node, the generated-source compiler, and Playwright Chromium.
+The first build pulls Playwright Chromium and is the slowest step. ClickHouse
+migrations run automatically. Open http://localhost:8787.
 
-For direct development:
+## Walking through a run
+
+Enter a surgical teaching prompt, for example:
+
+> Laparoscopic cholecystectomy, critical view of safety, for surgical trainees
+
+The run then moves through five stages, streamed live:
+
+1. **Clarify** — anatomy, laterality, approach, variation, audience, and teaching goal.
+2. **Research dossier** — three grounded medical research perspectives run in parallel and are synthesized into object studies, spatial relationships, contradictions, and readiness gaps. The dossier must be approved before generation starts.
+3. **Generation** — Gemini writes a complete React Three Fiber module against `@seein/atlas`. Placement, scale, and laterality are validated against the registered anatomical model, imports are constrained, and the source is typechecked and bundled.
+4. **Visual QA** — Chromium renders every required view and the real PNG is sent back to Gemini for inspection against the approved intent. A failure requests replacement source, and all views must pass again at that same revision.
+5. **Accepted scene** — explore the result in the viewer and step through the procedure. Accepted placement metadata is promoted to the reusable anatomy library.
+
+A run is bounded by `WORKFLOW_MAX_RUNTIME_MINUTES` (default 30) along with limits
+on logical AI calls, source repairs, and QA targets.
+
+## Direct development
+
+Use Node 22 or newer.
 
 ```bash
 npm ci
 npx playwright install chromium
 npm run typecheck
 npm test
+docker compose up clickhouse -d
+npm run migrate
 npm run dev
 ```
 

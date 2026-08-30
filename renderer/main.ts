@@ -414,7 +414,7 @@ async function renderAtlasModule(manifest: Manifest): Promise<void> {
   const sceneHead = title.closest(".scene-head") as HTMLElement | null;
   if (sceneHead) sceneHead.style.display = "none";
   const query = new URLSearchParams(location.search);
-  const moduleUrl = new URL(manifest.module.viewerUrl, location.href);
+  const moduleUrl = privateArtifactUrl(manifest.module.viewerUrl, query.get("artifactBase"));
   const stateId = query.get("state");
   const viewId = query.get("view");
   if (stateId) moduleUrl.searchParams.set("state", stateId);
@@ -492,6 +492,25 @@ async function renderAtlasModule(manifest: Manifest): Promise<void> {
     : `${manifest.module.definition.steps.length} surgical states · live generated module`;
   status.hidden = true;
   window.__SEEIN_READY__ = true;
+}
+
+/**
+ * Generated manifests use public artifact URLs so people can open a completed
+ * scene. Playwright instead opens the outer viewer at loopback, where it has no
+ * IAP browser session. In that one case, load only our own /artifacts files
+ * through the supplied private origin. Relative files in the module HTML then
+ * stay private as well.
+ */
+function privateArtifactUrl(value: string, artifactBase: string | null): URL {
+  const artifact = new URL(value, location.href);
+  if (!artifactBase || !artifact.pathname.startsWith("/artifacts/")) return artifact;
+  try {
+    const base = new URL(artifactBase, location.href);
+    if (base.protocol !== "http:" && base.protocol !== "https:") return artifact;
+    return new URL(`${artifact.pathname}${artifact.search}${artifact.hash}`, base);
+  } catch {
+    return artifact;
+  }
 }
 
 /**

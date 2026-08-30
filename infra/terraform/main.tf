@@ -8,6 +8,7 @@ locals {
     "artifactregistry.googleapis.com",
     "compute.googleapis.com",
     "iap.googleapis.com",
+    "run.googleapis.com",
     "secretmanager.googleapis.com",
   ])
   registry_host = "${var.region}-docker.pkg.dev"
@@ -35,6 +36,12 @@ resource "google_service_account" "vm" {
   project      = var.project_id
   account_id   = "seein-vm"
   display_name = "SeeIn VM runtime"
+}
+
+resource "google_service_account" "gateway" {
+  project      = var.project_id
+  account_id   = "seein-gateway"
+  display_name = "SeeIn Cloud Run gateway"
 }
 
 resource "google_artifact_registry_repository_iam_member" "vm_reader" {
@@ -114,10 +121,27 @@ resource "google_compute_firewall" "iap_ssh" {
   }
 }
 
-# This rule is deliberately created only after IAP has been enabled on the
-# backend service. Until then the public load balancer has no path to the VM.
+# The user-facing Cloud Run gateway has a revision-level network tag. This is
+# the sole ingress path to the VM application; ClickHouse has no host port.
+resource "google_compute_firewall" "gateway_to_worker" {
+  project     = var.project_id
+  name        = "seein-allow-gateway-to-worker"
+  network     = google_compute_network.seein.name
+  direction   = "INGRESS"
+  priority    = 1000
+  source_tags = ["seein-gateway"]
+  target_tags = ["seein-vm"]
+
+  allow {
+    protocol = "tcp"
+    ports    = [tostring(var.app_port)]
+  }
+}
+
+# Retained during migration so the existing IAP backend stays healthy until the
+# Cloud Run backend has an independent custom OAuth configuration.
 resource "google_compute_firewall" "load_balancer_to_app" {
-  count = var.enable_iap_backend_ingress ? 1 : 0
+  count = var.keep_vm_backend ? 1 : 0
 
   project       = var.project_id
   name          = "seein-allow-load-balancer"
@@ -131,6 +155,22 @@ resource "google_compute_firewall" "load_balancer_to_app" {
     protocol = "tcp"
     ports    = [tostring(var.app_port)]
   }
+}
+
+# Direct VPC egress needs the Cloud Run service agent to attach revisions to
+# this subnet. It avoids an always-on Serverless VPC Access connector.
+data "google_project" "current" {
+  project_id = var.project_id
+}
+
+resource "google_compute_subnetwork_iam_member" "cloud_run_network_user" {
+  project    = var.project_id
+  region     = google_compute_subnetwork.seein.region
+  subnetwork = google_compute_subnetwork.seein.name
+  role       = "roles/compute.networkUser"
+  member     = "serviceAccount:service-${data.google_project.current.number}@serverless-robot-prod.iam.gserviceaccount.com"
+
+  depends_on = [google_project_service.required]
 }
 
 resource "google_compute_instance" "seein" {
@@ -220,6 +260,94 @@ resource "google_compute_health_check" "seein" {
   }
 }
 
+resource "google_cloud_run_v2_service" "gateway" {
+  project  = var.project_id
+  name     = "seein-gateway"
+  location = var.region
+  ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+
+  # Direct Cloud Run IAP was enabled once in the console to generate the
+  # project OAuth client. The pinned Google provider does not yet expose this
+  # field, but subsequent image rollouts preserve it.
+
+  template {
+    service_account                  = google_service_account.gateway.email
+    max_instance_request_concurrency = 80
+
+    scaling {
+      max_instance_count = 3
+    }
+
+    containers {
+      image   = "${local.registry_path}:latest"
+      command = ["node"]
+      args    = ["dist/server/gateway.js"]
+
+      ports {
+        container_port = 8080
+      }
+
+      env {
+        name  = "UPSTREAM_BASE_URL"
+        value = "http://${google_compute_instance.seein.network_interface[0].network_ip}:${var.app_port}"
+      }
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+      }
+    }
+
+    vpc_access {
+      egress = "PRIVATE_RANGES_ONLY"
+
+      network_interfaces {
+        network    = google_compute_network.seein.id
+        subnetwork = google_compute_subnetwork.seein.id
+        tags       = ["seein-gateway"]
+      }
+    }
+  }
+
+  # Direct Cloud Run IAP is not represented by the pinned Google provider; a
+  # provider service update would otherwise remove its console-managed setting.
+  # The deployment script updates the image while preserving all other service
+  # settings. Change service infrastructure deliberately through gcloud until
+  # the provider can manage iap_enabled.
+  lifecycle {
+    ignore_changes = all
+  }
+
+  depends_on = [
+    google_compute_subnetwork_iam_member.cloud_run_network_user,
+    google_project_service.required,
+  ]
+}
+
+# IAP is enforced directly by Cloud Run for every ingress path, including
+# requests forwarded by the HTTPS load balancer. Only the IAP service agent may
+# invoke the application container.
+resource "google_cloud_run_v2_service_iam_member" "gateway_invoker" {
+  project  = var.project_id
+  location = google_cloud_run_v2_service.gateway.location
+  name     = google_cloud_run_v2_service.gateway.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-iap.iam.gserviceaccount.com"
+}
+
+resource "google_compute_region_network_endpoint_group" "gateway" {
+  project               = var.project_id
+  name                  = "seein-gateway-neg"
+  region                = var.region
+  network_endpoint_type = "SERVERLESS"
+
+  cloud_run {
+    service = google_cloud_run_v2_service.gateway.name
+  }
+}
+
 resource "google_compute_backend_service" "seein" {
   project               = var.project_id
   name                  = "seein-iap-backend"
@@ -240,6 +368,21 @@ resource "google_compute_backend_service" "seein" {
   }
 }
 
+# A VM backend service that ever had timeoutSec cannot be converted to a
+# serverless NEG, so this is a separate backend for the Cloud Run gateway.
+# IAP is configured directly on the Cloud Run service, not here.
+resource "google_compute_backend_service" "gateway" {
+  project               = var.project_id
+  name                  = "seein-iap-gateway"
+  protocol              = "HTTP"
+  load_balancing_scheme = "EXTERNAL"
+
+  backend {
+    group = google_compute_region_network_endpoint_group.gateway.id
+  }
+
+}
+
 resource "google_iap_web_backend_service_iam_member" "access_group" {
   project             = var.project_id
   web_backend_service = google_compute_backend_service.seein.name
@@ -249,10 +392,20 @@ resource "google_iap_web_backend_service_iam_member" "access_group" {
   depends_on = [google_project_service.required]
 }
 
+resource "google_iap_web_cloud_run_service_iam_binding" "gateway_access_group" {
+  project                = var.project_id
+  location               = var.region
+  cloud_run_service_name = google_cloud_run_v2_service.gateway.name
+  role                   = "roles/iap.httpsResourceAccessor"
+  members                = ["group:${var.iap_access_group}"]
+
+  depends_on = [google_project_service.required]
+}
+
 resource "google_compute_url_map" "seein" {
   project         = var.project_id
   name            = "seein-url-map"
-  default_service = google_compute_backend_service.seein.id
+  default_service = var.activate_cloud_run_gateway ? google_compute_backend_service.gateway.id : google_compute_backend_service.seein.id
 }
 
 resource "google_compute_managed_ssl_certificate" "seein" {

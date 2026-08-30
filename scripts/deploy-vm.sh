@@ -15,4 +15,4 @@ gcloud compute ssh "$instance" \
   --project="$project_id" \
   --zone="$zone" \
   --tunnel-through-iap \
-  --command="sudo /usr/local/bin/seein-deploy '$tag'"
+  --command="sudo bash -c 'set -a; . /etc/seein/config.env; set +a; exec /usr/local/bin/seein-deploy \"$tag\"'"

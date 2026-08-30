@@ -5,5 +5,6 @@ zone                       = "asia-south1-a"
 machine_type               = "e2-standard-2"
 boot_disk_size_gb          = 100
 app_domain                 = "seein.maybecoded.com"
-enable_iap_backend_ingress = true
 iap_access_group           = "seein-access@googlegroups.com"
+keep_vm_backend            = true
+activate_cloud_run_gateway = true

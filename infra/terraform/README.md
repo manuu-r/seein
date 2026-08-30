@@ -1,8 +1,9 @@
 # SeeIn Google Cloud infrastructure
 
-This configuration creates the initial Compute Engine deployment, Artifact
-Registry repository, Secret Manager containers, and an IAP-ready HTTPS load
-balancer. The VM has no public application firewall rule.
+This configuration creates the SeeIn deployment: an IAP-protected Cloud Run
+gateway, an HTTPS load balancer, and a private Compute Engine worker. The VM
+runs the long-running workflow, Playwright, local project artifacts, and
+ClickHouse; it has no public application firewall rule.
 
 ## Apply the infrastructure
 
@@ -20,29 +21,34 @@ provider before expecting the managed certificate to become active:
 seein.maybecoded.com.  A  <load_balancer_ip>
 ```
 
-## One-time External OAuth setup
+## One-time IAP setup
 
-External Google accounts require a custom IAP OAuth configuration. This cannot
-be safely placed in Terraform because it would put the generated OAuth secret
-in Terraform state.
+IAP is enabled directly on Cloud Run, which protects both the Cloud Run URL and
+traffic forwarded by the HTTPS load balancer. External Google accounts require
+a custom OAuth configuration; its secret is intentionally not in Terraform
+state.
 
-1. Open the `iap_console_url` Terraform output.
-2. Configure OAuth branding with **SeeIn**, `manu490.rm@gmail.com` as support
-   and contact email, and **External** as the audience. Google Auth Platform
-   requires a public SeeIn homepage and privacy-policy URL on a domain verified
-   in Google Search Console. They cannot be behind IAP.
-3. In IAP, select `seein-iap-backend`, open **Settings**, select **Custom
-   OAuth**, then choose **Auto Generate Credentials** and save.
-4. Confirm IAP is enabled for the backend service.
-5. Apply the backend firewall rule only after the prior step:
+1. Open **Cloud Run → seein-gateway → Security**.
+2. Select **Require authentication → Identity-Aware Proxy (IAP)** and save.
+3. For an external/no-organization project, choose **Configure in IAP** and
+   use **Auto generate credentials**. Configure the External OAuth brand first
+   if the console requests it.
+4. Verify the service reports IAP enabled:
 
 ```bash
-terraform apply -var='enable_iap_backend_ingress=true'
+gcloud beta run services describe seein-gateway \
+  --project=seein-507115 \
+  --region=asia-south1
 ```
 
-The IAP policy permits only the `seein-access@googlegroups.com` Google Group.
-Manage its membership in Google Groups to grant or revoke user access without
-rebuilding SeeIn.
+The Terraform IAP policy permits only the `seein-access@googlegroups.com`
+Google Group. Manage its membership in Google Groups to grant or revoke user
+access without rebuilding SeeIn.
+
+The currently pinned Terraform Google provider cannot represent Cloud Run's
+direct-IAP field. Terraform intentionally ignores the gateway service after
+creation so it cannot clear this console-managed security setting. The release
+script verifies that IAP remains enabled after every image update.
 
 ## First application release
 
@@ -55,15 +61,17 @@ scripts/set-runtime-secret.sh firecrawl
 ```
 
 Each command prompts silently for the key and creates a new secret version.
-Then start the initial `latest` image:
-
-```bash
-scripts/restart-vm.sh
-```
-
-For subsequent releases, publish an immutable tag and deploy it directly:
+Then publish and deploy an immutable image tag:
 
 ```bash
 scripts/build-push.sh <tag>
-scripts/deploy-vm.sh <tag>
+scripts/deploy-cloudrun.sh <tag>
+```
+
+`deploy-cloudrun.sh` updates the VM worker first, then the Cloud Run gateway,
+and fails if direct IAP is no longer enabled. Roll back by redeploying an
+earlier Artifact Registry tag:
+
+```bash
+scripts/deploy-cloudrun.sh <previous-tag>
 ```

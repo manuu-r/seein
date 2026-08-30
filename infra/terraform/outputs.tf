@@ -3,6 +3,11 @@ output "artifact_registry_image" {
   value       = local.registry_path
 }
 
+output "cloud_run_gateway" {
+  description = "Cloud Run gateway behind the IAP-protected load balancer."
+  value       = google_cloud_run_v2_service.gateway.name
+}
+
 output "vm_name" {
   value = google_compute_instance.seein.name
 }

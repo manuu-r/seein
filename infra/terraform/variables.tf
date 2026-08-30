@@ -40,8 +40,14 @@ variable "app_domain" {
   default     = "seein.maybecoded.com"
 }
 
-variable "enable_iap_backend_ingress" {
-  description = "Set only after IAP is enabled with a custom OAuth client in the Google Cloud console."
+variable "keep_vm_backend" {
+  description = "Keep the current VM backend on the load balancer during the Cloud Run gateway cutover."
+  type        = bool
+  default     = true
+}
+
+variable "activate_cloud_run_gateway" {
+  description = "Route the HTTPS load balancer to the Cloud Run gateway after direct Cloud Run IAP is enabled."
   type        = bool
   default     = false
 }
