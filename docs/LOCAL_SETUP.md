@@ -1,97 +1,38 @@
 # Local setup
 
-## Runtime modes
-
-Production-local mode uses:
+## Required environment
 
 ```env
-AI_DRIVER=gemini
+GEMINI_API_KEY=...
 CONTEXT_DRIVER=clickhouse
-BLENDER_DRIVER=qwen-mcp
-SCREENSHOT_DRIVER=playwright
+REFERENCE_SEARCH_DRIVER=firecrawl
+FIRECRAWL_API_KEY=...
+PLAYWRIGHT_HEADLESS=true
 ```
 
-The default Gemini model assignment is capability-specific:
+Set `REFERENCE_SEARCH_DRIVER=none` to run without downloaded reference images. Grounded textual research still runs through Gemini.
 
-```env
-GEMINI_RESEARCH_MODEL=gemini-3.7-flash
-GEMINI_REFERENCE_MODEL=gemini-3.1-flash-image
-GEMINI_PLANNER_MODEL=gemini-3.7-flash
-GEMINI_INSPECTOR_MODEL=gemini-3.7-flash
-```
-
-The reference model is separate because Google Image Search is supported by Gemini 3.1 Flash Image, while 3.7 Flash supplies the current structured text/multimodal workhorse. Model IDs remain independently overridable, and each role is included in its phase cache identity.
-
-Verification mode uses deterministic adapters:
-
-```env
-AI_DRIVER=deterministic
-CONTEXT_DRIVER=memory
-BLENDER_DRIVER=deterministic
-SCREENSHOT_DRIVER=placeholder
-```
-
-Verification mode exercises project creation, caching, asset generation, manifest revisions, QA patching, and artifact persistence without claiming visual equivalence to Blender and Chromium.
-
-The QA loop is bounded with:
-
-```env
-WORKFLOW_MAX_ITERATIONS=64
-WORKFLOW_MAX_QA_TARGETS=24
-WORKFLOW_MAX_RUNTIME_MINUTES=30
-WORKFLOW_MAX_LOGICAL_AI_CALLS=240
-WORKFLOW_MAX_TARGETED_RESEARCH_ROUNDS=8
-WORKFLOW_MIN_RECOGNIZABILITY=0.82
-WORKFLOW_MIN_DOMAIN_FIDELITY=0.78
-WORKFLOW_MIN_VISUAL_QUALITY=0.72
-WORKFLOW_MIN_CONSTRUCTION_COMPLETENESS=0.9
-WORKFLOW_AUTO_RESUME_INTERRUPTED=true
-```
-
-Allowed values are 1–128. The default `64` permits at most 63 repair actions, while the independent 30-minute and 240-logical-AI-call limits prevent runaway cost. Set `WORKFLOW_MAX_RUNTIME_MINUTES=240` only when starting a deliberate four-hour unattended run. Passing a target does not consume a repair slot, and every correction invalidates earlier target passes. A value of `1` performs inspection without a correction opportunity. If any safety budget is reached, the run records `qaExhausted: true` and checkpoints at `quality-blocked`; it is not complete. Resuming starts a fresh supervised window while retaining cached research, assets, scenes, renders, and the previous quality ledger.
-
-`WORKFLOW_AUTO_RESUME_INTERRUPTED=true` is the default. On startup, the backend distinguishes live in-process runs from orphaned `running` checkpoints and restarts the latter from their owning graph stage. Set it to `false` when deployments require an external job scheduler to own recovery.
-
-## ClickHouse
+## Docker
 
 ```bash
+cp .env.example .env
+docker compose up --build
+```
+
+## Native development
+
+Use Node 22 or newer.
+
+```bash
+npm ci
+npx playwright install chromium
 docker compose up clickhouse -d
 npm run migrate
+npm run dev
 ```
 
-The migration command is idempotent and does not require a Gemini key or Blender installation.
-
-To prove reuse, run the same deterministic prompt twice with `CONTEXT_DRIVER=clickhouse`. The second run should report cache hits for research, plan, each applicable render and inspection, while reusing only matching assets whose files still pass SHA-256 and measured-bounds validation. Queries and table purposes are documented in [CLICKHOUSE.md](CLICKHOUSE.md).
-
-## Qwen-MM-Plugins and Blender
-
-Install the Qwen-MM Blender capability following its pinned release instructions. The backend starts its MCP entry through stdio using `QWEN_MCP_COMMAND`. On Linux, the capability launches Blender through Xvfb; on macOS, a native Blender installation is used without Xvfb.
-
-Recommended environment:
-
-```env
-QWEN_MCP_COMMAND=qwen-mm-plugins-blender
-QWEN_MM_AUTOLAUNCH=1
-BLENDER_HOST=127.0.0.1
-BLENDER_PORT=9876
-```
-
-The Blender process and core API must see the same absolute `DATA_ROOT`. In containers, mount the same volume path into both processes.
-
-The Compose `core` service is explicitly `linux/amd64` for a reproducible worker image on Docker Desktop. Blender is installed during the image build, avoiding Qwen-MM's first-run download path and the possibility of CDN bot protection blocking an unattended container. Native macOS development can instead install Blender and run the Node backend outside Docker.
-
-The backend allows up to 20 minutes total for the batched MCP call, resets the idle timeout when progress arrives, and sends every missing recipe in the run through that single Blender execution.
-
-## Chromium
-
-Install Playwright's browser once:
-
-```bash
-npx playwright install chromium
-```
-
-`PLAYWRIGHT_EXECUTABLE_PATH` can point to an existing Chromium-compatible binary. When unset, the backend explicitly uses Playwright's bundled Chromium path; this avoids a separate headless-shell lookup on installations that only contain full Chromium.
+The API and UI are available at http://localhost:8787.
 
 ## Failure behavior
 
-A production provider failure fails the run and records the stage. Production mode never silently switches to deterministic content, because that would make a successful-looking run misleading.
+A missing Gemini key prevents startup. A malformed Gemini response, invalid anatomical placement, source sandbox violation, TypeScript error, browser error, or failed quality gate is persisted and shown to the user. There is no deterministic scene or placeholder-render mode.

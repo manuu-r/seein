@@ -21,8 +21,6 @@ services:
       retries: 20
 
   core:
-    # Keep the worker architecture explicit and reproducible on Docker Desktop.
-    platform: linux/amd64
     build:
       context: .
       dockerfile: docker/core.Dockerfile
@@ -31,25 +29,19 @@ services:
     env_file:
       - path: .env
         required: false
-    # These override .env. The env file carries secrets and tuning; which drivers
-    # the worker uses is a property of this image, not of the developer's machine.
+    # These override .env. The runtime has one generation path: Gemini writes R3F
+    # source, the backend compiles it, and Playwright renders it.
     environment:
       HOST: 0.0.0.0
       PUBLIC_BASE_URL: http://localhost:8787
       DATA_ROOT: /data
-      # The image ships Blender, Xvfb, and qwen-mm-plugins[blender], so the real
-      # recipe executor is always used here. The deterministic driver is a CI fixture
-      # that collapses every asset to a single cube.
-      BLENDER_DRIVER: qwen-mcp
+      # Keep routine UI polling out of Docker logs. Workflow/provider calls still
+      # print with destinations, timings, retries, and errors in a readable format.
+      LOG_FORMAT: pretty
+      LOG_LEVEL: info
+      LOG_HTTP_REQUESTS: "false"
       CONTEXT_DRIVER: clickhouse
-      SCREENSHOT_DRIVER: playwright
       CLICKHOUSE_URL: http://clickhouse:8123
-      QWEN_MCP_COMMAND: qwen-mm-plugins-blender
-      QWEN_MM_AUTOLAUNCH: "1"
-      QWEN_MM_CACHE: /data/qwen-cache
-      XDG_CACHE_HOME: /data/qwen-cache
-      # Must match the Dockerfile, or XDG_CACHE_HOME above silently relocates
-      # Playwright's browser lookup to an empty directory on the volume.
       PLAYWRIGHT_BROWSERS_PATH: /root/.cache/ms-playwright
     volumes:
       - ./data:/data

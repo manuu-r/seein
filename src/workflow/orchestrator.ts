@@ -1,6 +1,19 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { SurgicalModuleCompiler } from "../atlas/module-compiler.js";
+import {
+  loadAnatomicalRegistry,
+  validateModulePlacements,
+  validateRegisteredStructureFrames,
+} from "../atlas/anatomical-registry.js";
+import { SurgicalAtlasLibrary } from "../atlas/module-library.js";
+import {
+  SurgicalModuleSourceSchema,
+  type CompiledSurgicalModule,
+  type SurgicalModuleRecoveryContext,
+  type SurgicalModuleSource,
+} from "../atlas/module-contracts.js";
 import type { Config } from "../config.js";
 import type {
   Inspection,
@@ -8,34 +21,27 @@ import type {
   QualitySupervisorState,
   QaCoverage,
   QaTarget,
-  AssetGeometry,
   ProjectRecord,
   ResearchBrief,
-  ResolvedAsset,
   RunEvent,
   SceneManifest,
-  ScenePlan,
   SpatialReport,
   WorkflowStage,
   ReferenceArtifact,
 } from "../contracts.js";
-import { InspectionSchema, QaCoverageSchema, QualitySupervisorStateSchema, ReferenceCandidateSchema, ScenePlanSchema } from "../contracts.js";
-import type { PlannerReferenceImage, PlanRecoveryContext, WorkflowAI } from "../ai/workflow-ai.js";
-import type { BlenderDriver } from "../blender/blender-driver.js";
-import type { AssetRecord, ContextStore } from "../context/context-store.js";
+import { InspectionSchema, QaCoverageSchema, QualitySupervisorStateSchema, ReferenceCandidateSchema, SceneManifestSchema } from "../contracts.js";
+import type { PlannerReferenceImage, WorkflowAI } from "../ai/workflow-ai.js";
+import type { ContextStore } from "../context/context-store.js";
 import { hashObject, sha256 } from "../lib/hash.js";
 import { normalizePrompt } from "../lib/strings.js";
+import {
+  describeError,
+  safeLogFields,
+  type DiagnosticLogger,
+} from "../lib/diagnostics.js";
 import type { ScreenshotDriver } from "../render/screenshot-driver.js";
 import type { ReferenceCollector } from "../research/reference-collector.js";
 import { objectImageQuery, type ReferenceSearchDriver } from "../research/reference-search.js";
-import {
-  applyAssetRegeneration,
-  applyQaPatch,
-  applyResolvedAssets,
-  assembleScene,
-} from "../scene/scene-assembler.js";
-import { boundsSize, measureGlbBuffer, measureGlbGeometry, recipeBounds } from "../scene/geometry-bounds.js";
-import { analyzeSpatial } from "../scene/spatial-analyzer.js";
 import type { ArtifactStore, StoredArtifact } from "../storage/artifact-store.js";
 import type { ProjectManager } from "../storage/project-manager.js";
 import {
@@ -72,7 +78,7 @@ import {
 export interface WorkflowResult {
   project: ProjectRecord;
   research: ResearchBrief;
-  plan: ScenePlan;
+  plan: SurgicalModuleSource;
   initialScene: SceneManifest;
   finalScene: SceneManifest;
   finalInspection: Inspection;
@@ -85,6 +91,19 @@ export interface WorkflowResult {
 export interface FeedbackResult {
   state: WorkflowGraphState;
   nextProject?: ProjectRecord;
+}
+
+interface ProviderOperation<T> {
+  label: string;
+  provider: string;
+  destination: string;
+  action: string;
+  detail?: Record<string, unknown>;
+  resultDetail?: (result: T) => Record<string, unknown>;
+}
+
+function aiDestination(_provider: string): string {
+  return "Google Gemini API";
 }
 
 const CachedRenderSchema = z.object({
@@ -148,27 +167,6 @@ function uniqueReferences(candidates: ReferenceCandidate[]): ReferenceCandidate[
   });
 }
 
-async function loadRecoveryReferenceImages(
-  artifacts: ReferenceArtifact[],
-  dossier: ResearchDossier | undefined,
-  targetStudyIds: string[],
-  limit: number,
-): Promise<PlannerReferenceImage[]> {
-  if (limit <= 0) return [];
-  const fallbackStudy = dossier?.objectStudies.find((study) => targetStudyIds.includes(study.id))
-    ?? dossier?.objectStudies[0];
-  if (!fallbackStudy) return [];
-  const usable = artifacts.filter(
-    (artifact): artifact is ReferenceArtifact & { localPath: string; mediaType: string } =>
-      Boolean(artifact.localPath && artifact.mediaType),
-  ).slice(0, Math.max(1, limit * Math.max(1, targetStudyIds.length)));
-  return Promise.all(usable.map(async (artifact) => ({
-    studyId: fallbackStudy.id,
-    studyName: fallbackStudy.name,
-    mediaType: artifact.mediaType,
-    data: await fs.readFile(artifact.localPath),
-  })));
-}
 
 /**
  * Keep multimodal inspection bounded while showing Gemini more than the scene
@@ -197,20 +195,6 @@ function selectInspectionReferenceImages(
   return selected;
 }
 
-function mergeResearchBrief(base: ResearchBrief, recovery: ResearchBrief): ResearchBrief {
-  const uniqueStrings = (values: string[], limit: number) => [...new Set(values)].slice(0, limit);
-  const uniqueSources = new Map([...base.sources, ...recovery.sources].map((source) => [source.url, source]));
-  const uniqueImages = new Map([...base.references, ...recovery.references].map((reference) => [reference.imageUrl, reference]));
-  return {
-    concept: base.concept,
-    summary: `${base.summary}\n\nTargeted self-healing research:\n${recovery.summary}`.slice(0, 12_000),
-    visualNotes: uniqueStrings([...base.visualNotes, ...recovery.visualNotes], 12),
-    objectNotes: uniqueStrings([...base.objectNotes, ...recovery.objectNotes], 16),
-    styleKeywords: uniqueStrings([...base.styleKeywords, ...recovery.styleKeywords], 12),
-    sources: [...uniqueSources.values()].slice(0, 12),
-    references: [...uniqueImages.values()].slice(0, 64),
-  };
-}
 
 export class RunStoppedError extends Error {
   constructor() {
@@ -225,6 +209,9 @@ export class Orchestrator {
   private readonly interactionLocks = new Set<string>();
   private readonly sequences = new Map<string, number>();
   private readonly bypassCache = new Set<string>();
+  private operationSequence = 0;
+  private readonly atlasCompiler: SurgicalModuleCompiler;
+  private readonly atlasLibrary: SurgicalAtlasLibrary;
 
   constructor(
     private readonly config: Config,
@@ -234,9 +221,12 @@ export class Orchestrator {
     private readonly ai: WorkflowAI,
     private readonly references: ReferenceCollector,
     private readonly referenceSearch: ReferenceSearchDriver,
-    private readonly blender: BlenderDriver,
     private readonly screenshots: ScreenshotDriver,
-  ) {}
+    private readonly logger: DiagnosticLogger,
+  ) {
+    this.atlasCompiler = new SurgicalModuleCompiler(artifacts);
+    this.atlasLibrary = new SurgicalAtlasLibrary(artifacts);
+  }
 
   async start(prompt: string, userId = "local-user", parentProjectId?: string): Promise<ProjectRecord> {
     let project = await this.projects.create(prompt, userId, parentProjectId);
@@ -254,7 +244,7 @@ export class Orchestrator {
 
   async run(prompt: string): Promise<WorkflowResult> {
     const project = await this.projects.create(prompt);
-    return this.execute(project);
+    return this.executeAtlas(project);
   }
 
   /** Every persisted checkpoint, newest first, flagged with whether it can be rewound to. */
@@ -392,7 +382,7 @@ export class Orchestrator {
   async deleteProject(projectId: string): Promise<void> {
     const project = await this.projects.load(projectId);
     if (!project) throw new Error("Project not found");
-    // A run mid-flight still holds Blender and Chromium and will keep writing, so
+    // A run mid-flight still holds Chromium and provider requests and will keep writing, so
     // deleting underneath it would leave partial rows and orphaned files.
     if (this.activeRuns.has(projectId)) {
       throw new Error("This run is still working. Wait for it to finish or fail before deleting it.");
@@ -512,11 +502,12 @@ export class Orchestrator {
     // so fall back to them when the user does not describe a specific follow-up.
     const focus = request.feedback || remainingGaps.join(" ");
     if (!focus) throw new Error("Research-more requires feedback describing the missing evidence");
+    const searchHint = focus.slice(0, 300);
     const agenda = structuredClone(state.researchAgenda);
     if (!agenda) throw new Error("Research agenda is missing");
     for (const perspective of agenda.perspectives) {
-      perspective.objective = `${perspective.objective} Follow-up requested by user: ${focus}`;
-      perspective.searchHints = [...perspective.searchHints, focus].slice(0, 8);
+      perspective.objective = `${perspective.objective} Follow-up requested by user: ${focus}`.slice(0, 1000);
+      perspective.searchHints = [...perspective.searchHints, searchHint].slice(0, 8);
     }
     const next = transitionGraphState(
       state,
@@ -600,7 +591,7 @@ export class Orchestrator {
 
   async close(): Promise<void> {
     await Promise.allSettled([...this.activeRuns.values()]);
-    await Promise.all([this.blender.close(), this.screenshots.close()]);
+    await this.screenshots.close();
     await this.context.close();
   }
 
@@ -677,7 +668,15 @@ export class Orchestrator {
         const candidates = cached.success
           ? cached.data
           : await this.withProviderRetries(
-              "Reference image search",
+              project,
+              "auditing_research",
+              {
+                label: `Reference image search for ${study.name}`,
+                provider: this.referenceSearch.identity,
+                destination: this.config.FIRECRAWL_SEARCH_URL,
+                action: "POST image search",
+                detail: { studyId: study.id, query, requestedImages: requested },
+              },
               () => this.referenceSearch.searchImages(query, requested),
             ).catch(() => [] as ReferenceCandidate[]);
         if (!cached.success && candidates.length > 0) {
@@ -743,7 +742,14 @@ export class Orchestrator {
       const clarification = parsed.success
         ? parsed.data
         : await this.withProviderRetries(
-            "Gemini clarification",
+            project,
+            "clarifying",
+            {
+              label: "Intent clarification",
+              provider: this.ai.clarificationIdentity,
+              destination: aiDestination(this.ai.clarificationIdentity),
+              action: "models.generateContent",
+            },
             () => this.ai.clarify(project.prompt, state.preferenceProfile),
           );
       if (!parsed.success) await this.context.storeCachedStep(cacheKey, "clarification", clarification);
@@ -798,7 +804,14 @@ export class Orchestrator {
         prepared = cachedPreparation.success
           ? cachedPreparation.data
           : await this.withProviderRetries(
-              "Gemini intent preparation",
+              currentProject,
+              "planning_research",
+              {
+                label: "Intent and research planning",
+                provider: this.ai.clarificationIdentity,
+                destination: aiDestination(this.ai.clarificationIdentity),
+                action: "models.generateContent",
+              },
               () => this.ai.prepareIntent(
                 project.prompt,
                 state.clarification!,
@@ -845,7 +858,14 @@ export class Orchestrator {
       const referencePromise = cachedReferences.success
         ? Promise.resolve(cachedReferences.data)
         : this.withProviderRetries(
-            "Gemini reference research",
+            currentProject,
+            "researching",
+            {
+              label: "Grounded reference discovery",
+              provider: this.ai.referenceResearchIdentity,
+              destination: aiDestination(this.ai.referenceResearchIdentity),
+              action: "models.generateContent + image search grounding",
+            },
             () => this.ai.researchReferences(prepared!.intent, prepared!.agenda),
           ).then(async (discovery) => {
             const parsed = ReferenceDiscoverySchema.parse(discovery);
@@ -864,7 +884,15 @@ export class Orchestrator {
           branchHits[index] = cached.success;
           if (cached.success) return cached.data;
           const result = await this.withProviderRetries(
-            `Gemini ${perspective.id} research`,
+            currentProject,
+            "researching",
+            {
+              label: `${perspective.id} evidence research`,
+              provider: this.ai.deepResearchIdentity,
+              destination: aiDestination(this.ai.deepResearchIdentity),
+              action: "models.generateContent + Google Search grounding",
+              detail: { perspectiveId: perspective.id },
+            },
             () => this.ai.researchPerspective(prepared!.intent, perspective),
           );
           await this.context.storeCachedStep(key, `research-perspective:${perspective.id}`, result);
@@ -899,21 +927,34 @@ export class Orchestrator {
         intent: prepared.intent,
         perspectives,
         searchAttribution: referenceDiscovery.searchAttribution ?? null,
-        provider: this.ai.planningIdentity,
+        provider: this.ai.synthesisIdentity,
         schema: "research-dossier-draft-v2",
       });
       const cachedDraft = ResearchDossierDraftSchema.safeParse(await this.findCachedStepFor(currentProject.projectId, synthesisKey));
       const draft = cachedDraft.success
         ? cachedDraft.data
         : await this.withProviderRetries(
-            "Gemini research synthesis",
+            currentProject,
+            "auditing_research",
+            {
+              label: "Evidence dossier synthesis",
+              provider: this.ai.synthesisIdentity,
+              destination: aiDestination(this.ai.synthesisIdentity),
+              action: "models.generateContent",
+              detail: { perspectives: perspectives.length },
+            },
             () => this.ai.synthesizeResearch(prepared.intent, perspectives),
           );
       if (!cachedDraft.success) await this.context.storeCachedStep(synthesisKey, "research-dossier-draft", draft);
       // Reference images are attached per object study after synthesis, so each study
       // carries images of the thing it describes rather than of the scene in general.
       // The pipeline sets these URLs from search results; the model never invents them.
-      const studied = await this.attachObjectReferences(currentProject, prepared.intent, draft);
+      const priorDossiers = (await this.readCheckpoints(currentProject))
+        .flatMap((checkpoint) => checkpoint.researchDossier ? [checkpoint.researchDossier] : []);
+      const studied = carryForwardDossierEvidence(
+        priorDossiers,
+        await this.attachObjectReferences(currentProject, prepared.intent, draft),
+      );
       const dossier = evaluateResearchReadiness(
         prepared.intent,
         perspectives,
@@ -977,7 +1018,7 @@ export class Orchestrator {
     let state = startingState;
     try {
       if (!state.researchDossier || !state.intent) throw new Error("Approved generation is missing its research dossier");
-      const result = await this.execute(project, {
+      const result = await this.executeAtlas(project, {
         research: state.researchDossier.brief,
         intent: state.intent,
         dossier: state.researchDossier,
@@ -1079,7 +1120,13 @@ export class Orchestrator {
     ]);
   }
 
-  private async execute(
+  /**
+   * Production generation path: Gemini writes a procedure-specific R3F module
+   * against the curated surgical-atlas kit, the backend compiles it, and every
+   * required step/view is rendered and inspected. There is no alternate scene or
+   * render fallback.
+   */
+  private async executeAtlas(
     initialProject: ProjectRecord,
     options: {
       research?: ResearchBrief;
@@ -1100,20 +1147,30 @@ export class Orchestrator {
       const researchKey = hashObject({
         prompt: normalizePrompt(project.prompt),
         intent: options.intent ?? null,
-        schema: "research-v2",
+        schema: "atlas-research-v1",
         provider: this.ai.researchIdentity,
       });
       let research = options.research ?? await this.context.findResearch(researchKey);
       const researchCacheHit = options.research !== undefined || research !== null;
       if (!research) {
-        supervisor = this.consumeLogicalAiCall(supervisor, "initial research");
+        supervisor = this.consumeLogicalAiCall(supervisor, "atlas evidence research");
         await this.persistQualitySupervisor(project, supervisor);
-        research = await this.withProviderRetries("Gemini research", () => this.ai.research(project.prompt));
+        research = await this.withProviderRetries(
+          project,
+          "researching",
+          {
+            label: "Surgical module evidence research",
+            provider: this.ai.researchIdentity,
+            destination: aiDestination(this.ai.researchIdentity),
+            action: "models.generateContent + Google Search grounding",
+          },
+          () => this.ai.research(project.prompt),
+        );
         await this.context.storeResearch(researchKey, project.prompt, research);
       } else if (options.research) {
         await this.context.storeResearch(researchKey, project.prompt, research);
       }
-      // The planner reads these images, so they must be on disk before it runs.
+      if (!research) throw new Error("Surgical module generation has no research brief");
       const [referenceArtifacts] = await Promise.all([
         this.references.collect(research, path.join(project.root, "research", "references")),
         this.artifacts.writeJson(`${relativeRoot}/research/brief.json`, research),
@@ -1125,67 +1182,8 @@ export class Orchestrator {
         options.dossier,
         this.config.PLANNER_REFERENCE_IMAGES_PER_OBJECT,
       );
-      let inspectionReferenceImages = selectInspectionReferenceImages(plannerImages);
-      const reusableProcedural = options.dossier
-        ? await this.context.findProceduralComponents(
-            options.dossier.objectStudies.flatMap((study) => [
-              study.id,
-              study.name,
-              ...study.identityMarkers,
-              ...study.materials,
-            ]),
-            12,
-          )
-        : [];
-      const planKey = hashObject({
-        prompt: normalizePrompt(project.prompt),
-        research: hashObject(research),
-        intent: options.intent ?? null,
-        dossier: options.dossier ? hashObject(options.dossier) : null,
-        maxObjects: this.config.WORKFLOW_MAX_OBJECTS,
-        // A plan built while looking at different images is a different plan.
-        referenceImages: plannerImages.map((image) => `${image.studyId}:${sha256(image.data)}`),
-        reusableProcedural: reusableProcedural.map((component) => component.componentKey),
-        schema: "plan-procedural-v7",
-        provider: this.ai.planningIdentity,
-      });
-      const cachedPlan = ScenePlanSchema.safeParse(await this.findCachedStepFor(project.projectId, planKey));
-      const planCacheHit = cachedPlan.success;
-      const initialPlan = cachedPlan.success
-        ? cachedPlan.data
-        : await Promise.resolve().then(async () => {
-            supervisor = this.consumeLogicalAiCall(supervisor, "initial scene plan");
-            await this.persistQualitySupervisor(project, supervisor);
-            return this.withProviderRetries("Gemini scene planning", () => this.ai.plan(
-              project.prompt,
-              research!,
-              this.config.WORKFLOW_MAX_OBJECTS,
-              options.intent,
-              options.dossier,
-              plannerImages,
-              reusableProcedural,
-            ));
-          }).then(async (value) => {
-            const parsed = ScenePlanSchema.parse(value);
-            validatePlanAgainstDossier(parsed, options.dossier);
-            await this.context.storeCachedStep(planKey, "scene-plan", parsed);
-            return parsed;
-          });
-      const recoveringQualityRun =
-        supervisor.currentRevision > 1 ||
-        supervisor.inspections > 0 ||
-        supervisor.lastRecoveryReason.startsWith("Restarted after");
-      let plan = initialPlan;
-      if (recoveringQualityRun) {
-        try {
-          plan = ScenePlanSchema.parse(JSON.parse(
-            await fs.readFile(path.join(project.root, "plan", "scene-plan.json"), "utf8"),
-          ));
-        } catch {
-          plan = initialPlan;
-        }
-      }
-      validatePlanAgainstDossier(plan, options.dossier);
+      const inspectionReferenceImages = selectInspectionReferenceImages(plannerImages);
+      const reusableAtlas = await this.atlasLibrary.findRelevant(project.prompt, options.dossier);
       await Promise.all([
         this.artifacts.writeJson(`${relativeRoot}/research/references/index.json`, referenceArtifacts),
         this.emit(project, "researching", "completed", {
@@ -1193,88 +1191,128 @@ export class Orchestrator {
           preApprovedDossier: options.research !== undefined,
           referencesRequested: research.references.length,
           referencesDownloaded: referenceArtifacts.filter((artifact) => artifact.localPath).length,
-          referencesReused: referenceArtifacts.filter((artifact) => artifact.reused).length,
           referencesShownToPlanner: plannerImages.length,
-          proceduralComponentsShownToPlanner: reusableProcedural.length,
         }),
       ]);
+
+      const generateAndCompile = async (
+        revision: number,
+        recovery?: SurgicalModuleRecoveryContext,
+      ): Promise<{ source: SurgicalModuleSource; compiled: CompiledSurgicalModule }> => {
+        let retryRecovery = recovery;
+        supervisor = this.consumeLogicalAiCall(
+          supervisor,
+          recovery ? `atlas source repair ${revision}` : "initial atlas source generation",
+        );
+        await this.persistQualitySupervisor(project, supervisor);
+        return this.withProviderRetries(
+          project,
+          recovery ? "refining" : "planning",
+          {
+            label: recovery ? `Repair and compile surgical module revision ${revision}` : "Generate and compile surgical atlas module",
+            provider: `${this.ai.moduleIdentity} + ${this.atlasCompiler.identity}`,
+            destination: `${aiDestination(this.ai.moduleIdentity)} → isolated browser bundle`,
+            action: "models.generateContent → validate TSX → esbuild",
+            detail: {
+              revision,
+              referenceImages: plannerImages.length,
+              objectStudies: options.dossier?.objectStudies.length ?? 0,
+              recoveryView: recovery?.failedViewId ?? null,
+            },
+            resultDetail: (result) => ({
+              structures: result.source.definition.structures.length,
+              steps: result.source.definition.steps.length,
+              qaViews: result.source.definition.qaViews.length,
+              sourceBytes: Buffer.byteLength(result.source.source),
+              bundleSha256: result.compiled.bundleSha256,
+            }),
+          },
+          async () => {
+            const source = SurgicalModuleSourceSchema.parse(await this.ai.generateSurgicalModule(
+              project.prompt,
+              research!,
+              options.intent,
+              options.dossier,
+              plannerImages,
+              reusableAtlas,
+              retryRecovery,
+            ));
+            try {
+              validateSurgicalModuleAgainstDossier(source, options.dossier);
+              validateModulePlacements(
+                source.definition,
+                reusableAtlas.flatMap((entry) => entry.placements),
+              );
+              validateProcedureAtlasContract(project.prompt, source);
+              const compiled = await this.atlasCompiler.compile(relativeRoot, revision, source);
+              return { source, compiled };
+            } catch (error) {
+              const issue = error instanceof Error ? error.message : String(error);
+              retryRecovery = {
+                attempt: (retryRecovery?.attempt ?? 0) + 1,
+                failedViewId: retryRecovery?.failedViewId ?? "compile-validation",
+                ...(retryRecovery?.failedStepId ? { failedStepId: retryRecovery.failedStepId } : {}),
+                issue: issue.slice(0, 8_000),
+                evidence: "The generated source was rejected before browser execution. Correct every reported compiler or atlas-contract error in the replacement source.",
+                failedCriteria: ["Generated TSX must pass semantic TypeScript validation against @seein/atlas before bundling."],
+                previous: source,
+              };
+              throw error;
+            }
+          },
+        );
+      };
 
       project = await this.stage(project, "planning");
+      let currentRevision = 1;
+      let built = await generateAndCompile(currentRevision);
+      let source = built.source;
+      let compiled = built.compiled;
       await Promise.all([
-        this.artifacts.writeJson(`${relativeRoot}/plan/scene-plan.json`, plan),
+        this.artifacts.writeJson(`${relativeRoot}/module/definition.json`, source.definition),
+        this.artifacts.writeJson(`${relativeRoot}/module/compiled.json`, compiled),
         this.emit(project, "planning", "completed", {
-          cacheHit: planCacheHit,
-          assets: plan.assets.length,
-          objects: plan.objects.length,
-        }),
-      ]);
-
-      project = await this.stage(project, "resolving_assets");
-      const baseRevision = recoveringQualityRun ? supervisor.currentRevision : 1;
-      let resolved = await this.resolveAssets(project, plan, baseRevision);
-      await Promise.all([
-        this.artifacts.writeJson(`${relativeRoot}/assets/index.json`, [...resolved.values()]),
-        this.emit(project, "resolving_assets", "completed", {
-          generated: [...resolved.values()].filter((asset) => !asset.reused).length,
-          reused: [...resolved.values()].filter((asset) => asset.reused).length,
+          generator: this.ai.moduleIdentity,
+          compiler: this.atlasCompiler.identity,
+          structures: source.definition.structures.length,
+          steps: source.definition.steps.length,
+          qaViews: source.definition.qaViews.length,
+          importedAssets: 0,
         }),
       ]);
 
       project = await this.stage(project, "assembling");
-      const latestStoredScene = recoveringQualityRun
-        ? await this.context.findLatestScene(project.projectId)
-        : null;
-      const initialScene = latestStoredScene && latestStoredScene.revision === supervisor.currentRevision
-        ? latestStoredScene
-        : assembleScene(project.projectId, plan, resolved, baseRevision);
-      const initialSpatial = analyzeSpatial(plan, initialScene, resolved);
-      const [initialManifest] = await Promise.all([
-        this.storeScene(project, initialScene),
-        this.artifacts.writeJson(
-          `${relativeRoot}/qa/spatial-revision-${padRevision(initialScene.revision)}.json`,
-          initialSpatial,
-        ),
-        this.context.storeSpatial(project.projectId, initialScene.revision, initialSpatial),
-      ]);
-      await this.emit(project, "assembling", "completed", {
-        revision: initialScene.revision,
-        spatialIssues: initialSpatial.issues.length,
-      });
-
+      const initialScene = surgicalModuleManifest(project.projectId, compiled);
       let currentScene = initialScene;
-      let currentSpatial = initialSpatial;
-      let currentManifest = initialManifest;
-      let refinements = 0;
-      let finalVerdict: Inspection["verdict"] = "pass";
-      let finalInspection: Inspection | null = null;
-      let targets = buildQaTargets(initialScene, this.config.WORKFLOW_MAX_QA_TARGETS);
-      const validTargetIds = new Set(targets.map((target) => target.id));
-      const recoveredPassedTargetIds = recoveringQualityRun
-        ? supervisor.passedTargetIds.filter((targetId) => validTargetIds.has(targetId))
-        : [];
-      // If a crash landed after the final target pass but before terminal coverage
-      // was persisted, conservatively recheck the matrix. Otherwise resume at the
-      // first unresolved target and avoid paying to re-inspect proven views.
-      const passedTargetIds = new Set(
-        recoveredPassedTargetIds.length === targets.length ? [] : recoveredPassedTargetIds,
-      );
-      let targetIndex = targets.findIndex((target) => !passedTargetIds.has(target.id));
-      if (targetIndex < 0) targetIndex = 0;
+      let currentManifest = await this.storeScene(project, currentScene);
+      let currentSpatial = emptyModuleSpatialReport(currentScene.revision);
+      await Promise.all([
+        this.artifacts.writeJson(`${relativeRoot}/qa/spatial-revision-${padRevision(currentScene.revision)}.json`, currentSpatial),
+        this.context.storeSpatial(project.projectId, currentScene.revision, currentSpatial),
+        this.emit(project, "assembling", "completed", {
+          revision: currentScene.revision,
+          moduleUrl: compiled.viewerUrl,
+          structures: source.definition.structures.length,
+          steps: source.definition.steps.length,
+        }),
+      ]);
+
+      let targets = buildQaTargets(currentScene, this.config.WORKFLOW_MAX_QA_TARGETS);
+      const passedTargetIds = new Set<string>();
+      let targetIndex = 0;
+      let currentTarget = targets[0]!;
       let inspectionCount = 0;
-      let currentTarget = targets[targetIndex]!;
+      let refinements = 0;
+      let finalInspection: Inspection | null = null;
+      let finalVerdict: Inspection["verdict"] = "fix";
       supervisor = QualitySupervisorStateSchema.parse({
         ...supervisor,
-        currentRevision: currentScene.revision,
+        currentRevision,
         currentTargetId: currentTarget.id,
-        passedTargetIds: [...passedTargetIds],
+        passedTargetIds: [],
         updatedAt: new Date().toISOString(),
       });
       await this.persistQualitySupervisor(project, supervisor);
-      currentSpatial = analyzeSpatial(plan, currentScene, resolved, currentTarget);
-      await Promise.all([
-        this.artifacts.writeJson(qaSpatialKey(relativeRoot, currentScene.revision, currentTarget), currentSpatial),
-        this.context.storeSpatial(project.projectId, currentScene.revision, currentSpatial),
-      ]);
 
       project = await this.stage(project, "rendering_initial");
       let currentRender = await this.renderQaTarget(
@@ -1290,8 +1328,8 @@ export class Orchestrator {
         targetId: currentTarget.id,
         stateId: currentTarget.stateId ?? null,
         viewId: currentTarget.viewId ?? null,
-        cacheHit: currentRender.cacheHit,
         browserErrors: currentRender.capture.browserErrors,
+        generatedModule: true,
       });
 
       while (targetIndex < targets.length) {
@@ -1300,48 +1338,37 @@ export class Orchestrator {
           supervisor = QualitySupervisorStateSchema.parse({
             ...supervisor,
             status: budgetStatus,
-            lastRecoveryReason: `Stopped before target ${currentTarget.id}: ${budgetStatus}.`,
+            lastRecoveryReason: `Stopped before generated-module target ${currentTarget.id}: ${budgetStatus}.`,
             updatedAt: new Date().toISOString(),
           });
           await this.persistQualitySupervisor(project, supervisor);
           break;
         }
+
         inspectionCount += 1;
         project = await this.stage(project, "inspecting");
-        const inspectionKey = hashObject({
-          scene: canonicalSceneForQa(currentScene),
-          planAssets: hashObject(plan.assets),
-          spatial: canonicalSpatialForQa(currentSpatial),
-          target: currentTarget,
-          screenshot: currentRender.artifact.sha256,
-          browserErrors: currentRender.capture.browserErrors,
-          acceptanceBrief: hashObject({
-            requestPrompt: project.prompt,
-            intent: options.intent ?? null,
-            research,
-            objectStudies: options.dossier?.objectStudies ?? [],
-            intentCoverage: options.dossier?.intentCoverage ?? [],
-            contradictions: options.dossier?.contradictions ?? [],
-          }),
-          referenceImages: inspectionReferenceImages.map((image) => `${image.studyId}:${sha256(image.data)}`),
-          provider: this.ai.inspectionIdentity,
-          renderer: this.screenshots.identity,
-          recoveryAttempt: supervisor.attempt,
-          qualitySession: options.qualitySessionKey ?? "shared-warm-cache",
-          schema: "inspection-visual-target-comparison-v6",
-        });
-        const cachedInspection = InspectionSchema.safeParse(await this.findCachedStepFor(project.projectId, inspectionKey));
-        let rawInspection: Inspection;
-        if (cachedInspection.success) {
-          rawInspection = cachedInspection.data;
-        } else {
-          supervisor = this.consumeLogicalAiCall(supervisor, `inspection ${currentTarget.id}`);
-          await this.persistQualitySupervisor(project, supervisor);
-          rawInspection = await this.withProviderRetries("Gemini visual inspection", () => this.ai.inspect(
+        supervisor = this.consumeLogicalAiCall(supervisor, `generated module inspection ${currentTarget.id}`);
+        await this.persistQualitySupervisor(project, supervisor);
+        const rawInspection = await this.withProviderRetries(
+          project,
+          "inspecting",
+          {
+            label: `Visual QA: ${currentTarget.label}`,
+            provider: this.ai.inspectionIdentity,
+            destination: aiDestination(this.ai.inspectionIdentity),
+            action: "models.generateContent (multimodal)",
+            detail: {
+              targetId: currentTarget.id,
+              stateId: currentTarget.stateId ?? null,
+              viewId: currentTarget.viewId ?? null,
+              revision: currentRevision,
+              generatedModule: true,
+            },
+          },
+          () => this.ai.inspect(
             currentScene,
             currentRender.artifact.path,
             currentSpatial,
-            plan,
             {
               requestPrompt: project.prompt,
               approvedIntent: options.intent,
@@ -1357,339 +1384,127 @@ export class Orchestrator {
               refinement: refinements,
             },
             inspectionReferenceImages,
-          ));
-        }
+          ),
+        );
         let inspection = InspectionSchema.parse({
           ...rawInspection,
           targetId: currentTarget.id,
           ...(currentTarget.stateId ? { stateId: currentTarget.stateId } : {}),
           ...(currentTarget.viewId ? { viewId: currentTarget.viewId } : {}),
         });
-        let qualityGate = evaluateQualityGate(
-          inspection,
-          currentSpatial,
-          currentRender.capture.browserErrors,
-          this.config,
-        );
+        let qualityGate = evaluateQualityGate(inspection, currentSpatial, currentRender.capture.browserErrors, this.config);
         if (inspection.verdict === "pass" && !qualityGate.passed) {
           inspection = rejectFalsePass(inspection, qualityGate.reasons);
-          qualityGate = evaluateQualityGate(
-            inspection,
-            currentSpatial,
-            currentRender.capture.browserErrors,
-            this.config,
-          );
+          qualityGate = evaluateQualityGate(inspection, currentSpatial, currentRender.capture.browserErrors, this.config);
         }
         const progress = recordQualityInspection(supervisor, inspection, currentTarget.id, this.config);
         supervisor = progress.state;
-        const recoveryAction = chooseRecoveryAction(
-          inspection,
-          progress.stalled,
-          currentRender.capture.browserErrors,
-          currentSpatial,
-        );
-        const canRefine =
-          !qualityGate.passed &&
-          qualitySupervisorBudgetStatus(supervisor, this.config) === "running" &&
-          recoveryAction !== "none";
-        await Promise.all([
-          this.artifacts.writeJson(
-            qaInspectionKey(relativeRoot, currentScene.revision, currentTarget),
-            inspection,
-          ),
-          this.context.storeQa(project.projectId, currentScene.revision, inspection),
-          cachedInspection.success
-            ? Promise.resolve()
-            : this.context.storeCachedStep(inspectionKey, "inspection", inspection),
-          this.persistQualitySupervisor(project, supervisor),
-        ]);
-        await this.emit(project, "inspecting", "completed", {
-          inspection: inspectionCount,
-          refinement: refinements,
-          revision: currentScene.revision,
-          targetId: currentTarget.id,
-          stateId: currentTarget.stateId ?? null,
-          viewId: currentTarget.viewId ?? null,
-          cacheHit: cachedInspection.success,
-          verdict: inspection.verdict,
-          category: inspection.category,
-          scores: inspection.assessment,
-          qualityGate: qualityGate.passed,
-          qualityFailures: qualityGate.reasons,
-          recoveryAction,
-          stalled: progress.stalled,
-          canRefine,
-        });
-        finalVerdict = inspection.verdict;
         finalInspection = inspection;
+        finalVerdict = inspection.verdict;
+        await Promise.all([
+          this.artifacts.writeJson(qaInspectionKey(relativeRoot, currentRevision, currentTarget), inspection),
+          this.context.storeQa(project.projectId, currentRevision, inspection),
+          this.persistQualitySupervisor(project, supervisor),
+          this.emit(project, "inspecting", "completed", {
+            inspection: inspectionCount,
+            refinement: refinements,
+            revision: currentRevision,
+            targetId: currentTarget.id,
+            verdict: inspection.verdict,
+            category: inspection.category,
+            scores: inspection.assessment,
+            generatedModule: true,
+          }),
+        ]);
+
         if (qualityGate.passed) {
           passedTargetIds.add(currentTarget.id);
-          supervisor = QualitySupervisorStateSchema.parse({
-            ...supervisor,
-            passedTargetIds: [...passedTargetIds],
-            currentTargetId: targets[targetIndex + 1]?.id,
-            updatedAt: new Date().toISOString(),
-          });
-          await this.persistQualitySupervisor(project, supervisor);
           targetIndex += 1;
           if (targetIndex >= targets.length) break;
           currentTarget = targets[targetIndex]!;
-          currentSpatial = analyzeSpatial(plan, currentScene, resolved, currentTarget);
-          await Promise.all([
-            this.artifacts.writeJson(qaSpatialKey(relativeRoot, currentScene.revision, currentTarget), currentSpatial),
-            this.context.storeSpatial(project.projectId, currentScene.revision, currentSpatial),
-          ]);
-          project = await this.stage(project, "rendering_final");
-          currentRender = await this.renderQaTarget(
-            project,
-            currentScene,
-            currentManifest,
-            currentTarget,
-            relativeRoot,
-            "final",
-          );
-          await this.emit(project, "rendering_final", "completed", {
-            inspection: inspectionCount,
-            refinement: refinements,
-            revision: currentScene.revision,
-            targetId: currentTarget.id,
-            stateId: currentTarget.stateId ?? null,
-            viewId: currentTarget.viewId ?? null,
-            cacheHit: currentRender.cacheHit,
-            browserErrors: currentRender.capture.browserErrors,
-          });
-          continue;
-        }
-        if (!canRefine) {
-          break;
-        }
-
-        project = await this.stage(project, "refining");
-        if (recoveryAction === "rerender") {
-          refinements += 1;
           supervisor = QualitySupervisorStateSchema.parse({
             ...supervisor,
-            attempt: supervisor.attempt + 1,
-            refinements: supervisor.refinements + 1,
-            lastRecoveryReason: `Renderer recovery for ${currentTarget.id}: ${currentRender.capture.browserErrors.join(" | ")}`,
+            currentTargetId: currentTarget.id,
+            passedTargetIds: [...passedTargetIds],
             updatedAt: new Date().toISOString(),
           });
           await this.persistQualitySupervisor(project, supervisor);
           project = await this.stage(project, "rendering_final");
-          currentRender = await this.renderQaTarget(
-            project,
-            currentScene,
-            currentManifest,
-            currentTarget,
-            relativeRoot,
-            "final",
-          );
+          currentRender = await this.renderQaTarget(project, currentScene, currentManifest, currentTarget, relativeRoot, "final");
+          await this.emit(project, "rendering_final", "completed", {
+            revision: currentRevision,
+            targetId: currentTarget.id,
+            browserErrors: currentRender.capture.browserErrors,
+            generatedModule: true,
+          });
           continue;
         }
 
-        const nextRevision = currentScene.revision + 1;
-        let targetedResearchUsed = false;
-        let replanUsed = false;
-        if (recoveryAction === "targeted-research" || recoveryAction === "partial-replan") {
-          const targetStudyIds = resolveRecoveryStudyIds(inspection, plan, currentSpatial);
-          const useResearch =
-            recoveryAction === "targeted-research" &&
-            supervisor.targetedResearchRounds < this.config.WORKFLOW_MAX_TARGETED_RESEARCH_ROUNDS &&
-            supervisor.logicalAiCalls + 2 <= this.config.WORKFLOW_MAX_LOGICAL_AI_CALLS;
-          let recoveryImages: PlannerReferenceImage[] = [];
-          if (useResearch) {
-            const questions = inspection.assessment.researchQuestions.length > 0
-              ? inspection.assessment.researchQuestions
-              : [...inspection.assessment.failedCriteria, inspection.issue].filter(Boolean).slice(0, 8);
-            const recoveryPrompt = `${project.prompt}\n\nTargeted self-healing medical research for attempt ${supervisor.attempt + 1}. The rendered surgeon-facing anatomy visualization failed recognizability or anatomical fidelity. Research only these anatomical studies: ${targetStudyIds.join(", ") || "the primary anatomy"}. Answer these reconstruction questions with grounded medical evidence: ${questions.join(" | ")}. Focus on label-independent identity, laterality, operative orientation, topology/branching, tissue planes, attachment/containment/adjacency, structures at risk, proportions, surgical approach relationships, and the exact views needed to verify them. Preserve variants and technique dependence instead of inventing one answer.`;
-            const recoveryResearchKey = hashObject({
-              prompt: normalizePrompt(recoveryPrompt),
-              previousPlan: hashObject(plan),
-              attempt: supervisor.attempt + 1,
-              provider: this.ai.researchIdentity,
-              schema: "targeted-self-heal-research-v1",
-            });
-            let recoveryBrief = await this.context.findResearch(recoveryResearchKey);
-            if (!recoveryBrief) {
-              supervisor = this.consumeLogicalAiCall(supervisor, "targeted self-healing research");
-              await this.persistQualitySupervisor(project, supervisor);
-              recoveryBrief = await this.withProviderRetries(
-                "Gemini targeted research",
-                () => this.ai.research(recoveryPrompt),
-              );
-              await this.context.storeResearch(recoveryResearchKey, recoveryPrompt, recoveryBrief);
-            }
-            if (!recoveryBrief) throw new Error("Targeted research completed without a brief");
-            research = mergeResearchBrief(research, recoveryBrief);
-            const recoveryDirectory = path.join(
-              project.root,
-              "research",
-              "recovery",
-              `attempt-${String(supervisor.attempt + 1).padStart(3, "0")}`,
-            );
-            const recoveryArtifacts = await this.references.collect(recoveryBrief, recoveryDirectory);
-            recoveryImages = await loadRecoveryReferenceImages(
-              recoveryArtifacts,
-              options.dossier,
-              targetStudyIds,
-              this.config.PLANNER_REFERENCE_IMAGES_PER_OBJECT,
-            );
-            inspectionReferenceImages = selectInspectionReferenceImages([
-              ...recoveryImages,
-              ...inspectionReferenceImages,
-            ]);
-            await Promise.all([
-              this.artifacts.writeJson(`${relativeRoot}/research/brief.json`, research),
-              this.artifacts.writeJson(
-                `${relativeRoot}/research/recovery/attempt-${String(supervisor.attempt + 1).padStart(3, "0")}.json`,
-                recoveryBrief,
-              ),
-            ]);
-            targetedResearchUsed = true;
-          }
-          const recoveryContext: PlanRecoveryContext = {
-            attempt: supervisor.attempt + 1,
-            reason: progress.stalled
-              ? `Quality plateau or repeated repair: ${inspection.issue}`
-              : inspection.assessment.rationale,
-            targetStudyIds,
-            failedTargetIds: [currentTarget.id, ...targets.filter((target) => !passedTargetIds.has(target.id)).map((target) => target.id)],
-            previousPlan: plan,
-            inspection,
-          };
-          const recoveryPlanKey = hashObject({
-            prompt: normalizePrompt(project.prompt),
-            research: hashObject(research),
-            recovery: recoveryContext,
-            images: recoveryImages.map((image) => sha256(image.data)),
-            provider: this.ai.planningIdentity,
-            schema: "self-healing-plan-v2",
-          });
-          const cachedRecoveryPlan = ScenePlanSchema.safeParse(
-            await this.findCachedStepFor(project.projectId, recoveryPlanKey),
-          );
-          if (cachedRecoveryPlan.success) {
-            plan = cachedRecoveryPlan.data;
-          } else {
-            supervisor = this.consumeLogicalAiCall(supervisor, "self-healing scene replan");
-            await this.persistQualitySupervisor(project, supervisor);
-            plan = ScenePlanSchema.parse(await this.withProviderRetries(
-              "Gemini self-healing plan",
-              () => this.ai.plan(
-                project.prompt,
-                research!,
-                this.config.WORKFLOW_MAX_OBJECTS,
-                options.intent,
-                options.dossier,
-                [...plannerImages, ...recoveryImages],
-                reusableProcedural,
-                recoveryContext,
-              ),
-            ));
-            validatePlanAgainstDossier(plan, options.dossier);
-            await this.context.storeCachedStep(recoveryPlanKey, "self-healing-scene-plan", plan);
-          }
-          resolved = await this.resolveAssets(project, plan, nextRevision);
-          currentScene = assembleScene(project.projectId, plan, resolved, nextRevision);
-          targets = buildQaTargets(currentScene, this.config.WORKFLOW_MAX_QA_TARGETS);
-          replanUsed = true;
-          await Promise.all([
-            this.artifacts.writeJson(`${relativeRoot}/plan/scene-plan.json`, plan),
-            this.artifacts.writeJson(
-              `${relativeRoot}/plan/scene-plan-revision-${padRevision(nextRevision)}.json`,
-              plan,
-            ),
-            this.artifacts.writeJson(`${relativeRoot}/assets/index.json`, [...resolved.values()]),
-            this.artifacts.writeJson(
-              `${relativeRoot}/assets/index-revision-${padRevision(nextRevision)}.json`,
-              [...resolved.values()],
-            ),
-          ]);
-        } else if (inspection.patch.kind === "asset-regenerate") {
-          plan = applyAssetRegeneration(plan, inspection.patch);
-          resolved = await this.resolveAssets(project, plan, nextRevision);
-          currentScene = applyResolvedAssets(currentScene, plan, resolved);
-          await Promise.all([
-            this.artifacts.writeJson(`${relativeRoot}/plan/scene-plan.json`, plan),
-            this.artifacts.writeJson(
-              `${relativeRoot}/plan/scene-plan-revision-${padRevision(nextRevision)}.json`,
-              plan,
-            ),
-            this.artifacts.writeJson(`${relativeRoot}/assets/index.json`, [...resolved.values()]),
-            this.artifacts.writeJson(
-              `${relativeRoot}/assets/index-revision-${padRevision(nextRevision)}.json`,
-              [...resolved.values()],
-            ),
-          ]);
-        } else {
-          currentScene = applyQaPatch(currentScene, inspection.patch);
-          if (inspection.patch.kind === "procedural-node" || inspection.patch.kind === "procedural-landmark") {
-            plan = ScenePlanSchema.parse({ ...plan, procedural: currentScene.procedural });
-            await Promise.all([
-              this.artifacts.writeJson(`${relativeRoot}/plan/scene-plan.json`, plan),
-              this.artifacts.writeJson(
-                `${relativeRoot}/plan/scene-plan-revision-${padRevision(nextRevision)}.json`,
-                plan,
-              ),
-            ]);
-          }
+        if (qualitySupervisorBudgetStatus(supervisor, this.config) !== "running") break;
+        project = await this.stage(project, "refining");
+        const failedTarget = currentTarget;
+        currentRevision += 1;
+        const recovery: SurgicalModuleRecoveryContext = {
+          attempt: refinements + 1,
+          failedViewId: currentTarget.viewId ?? currentTarget.id,
+          failedStepId: currentTarget.stateId,
+          issue: inspection.issue || "The generated surgical view did not pass the quality gate.",
+          evidence: inspection.evidence,
+          failedCriteria: inspection.assessment.failedCriteria,
+          previous: source,
+        };
+        built = await generateAndCompile(currentRevision, recovery);
+        source = built.source;
+        compiled = built.compiled;
+        currentScene = surgicalModuleManifest(project.projectId, compiled);
+        currentManifest = await this.storeScene(project, currentScene);
+        currentSpatial = emptyModuleSpatialReport(currentRevision);
+        targets = buildQaTargets(currentScene, this.config.WORKFLOW_MAX_QA_TARGETS);
+        const recoveryTargetIndex = targets.findIndex((target) =>
+          target.id === failedTarget.id
+          || (target.viewId === failedTarget.viewId && target.stateId === failedTarget.stateId),
+        );
+        if (recoveryTargetIndex > 0) {
+          const [recoveryTarget] = targets.splice(recoveryTargetIndex, 1);
+          targets.unshift(recoveryTarget!);
         }
-        refinements += 1;
         passedTargetIds.clear();
         targetIndex = 0;
         currentTarget = targets[0]!;
+        refinements += 1;
         supervisor = QualitySupervisorStateSchema.parse({
           ...supervisor,
           attempt: supervisor.attempt + 1,
           refinements: supervisor.refinements + 1,
-          targetedResearchRounds: supervisor.targetedResearchRounds + (targetedResearchUsed ? 1 : 0),
-          replans: supervisor.replans + (replanUsed ? 1 : 0),
-          currentRevision: currentScene.revision,
+          replans: supervisor.replans + 1,
+          currentRevision,
           currentTargetId: currentTarget.id,
           passedTargetIds: [],
-          lastRecoveryReason: `${recoveryAction}: ${inspection.issue || inspection.assessment.rationale}`,
+          lastRecoveryReason: `Generated source repair: ${inspection.issue || inspection.assessment.rationale}`,
           updatedAt: new Date().toISOString(),
         });
-        currentSpatial = analyzeSpatial(plan, currentScene, resolved, currentTarget);
-        [currentManifest] = await Promise.all([
-          this.storeScene(project, currentScene),
-          this.artifacts.writeJson(
-            qaSpatialKey(relativeRoot, currentScene.revision, currentTarget),
-            currentSpatial,
-          ),
-          this.context.storeSpatial(project.projectId, currentScene.revision, currentSpatial),
+        await Promise.all([
+          this.artifacts.writeJson(`${relativeRoot}/module/definition.json`, source.definition),
+          this.artifacts.writeJson(`${relativeRoot}/module/compiled.json`, compiled),
+          this.artifacts.writeJson(`${relativeRoot}/module/definition-revision-${padRevision(currentRevision)}.json`, source.definition),
+          this.artifacts.writeJson(`${relativeRoot}/qa/spatial-revision-${padRevision(currentRevision)}.json`, currentSpatial),
+          this.context.storeSpatial(project.projectId, currentRevision, currentSpatial),
           this.persistQualitySupervisor(project, supervisor),
+          this.emit(project, "refining", "completed", {
+            revision: currentRevision,
+            repair: "full-source-regeneration",
+            structures: source.definition.structures.length,
+            steps: source.definition.steps.length,
+            resetTargets: targets.length,
+          }),
         ]);
-        await this.emit(project, "refining", "completed", {
-          inspection: inspectionCount,
-          refinement: refinements,
-          revision: currentScene.revision,
-          patch: inspection.patch.kind,
-          recoveryAction,
-          targetedResearch: targetedResearchUsed,
-          replan: replanUsed,
-          resetTargets: targets.length,
-          spatialIssues: currentSpatial.issues.length,
-        });
-
         project = await this.stage(project, "rendering_final");
-        currentRender = await this.renderQaTarget(
-          project,
-          currentScene,
-          currentManifest,
-          currentTarget,
-          relativeRoot,
-          "final",
-        );
+        currentRender = await this.renderQaTarget(project, currentScene, currentManifest, currentTarget, relativeRoot, "final");
         await this.emit(project, "rendering_final", "completed", {
-          inspection: inspectionCount,
-          refinement: refinements,
-          revision: currentScene.revision,
+          revision: currentRevision,
           targetId: currentTarget.id,
-          stateId: currentTarget.stateId ?? null,
-          viewId: currentTarget.viewId ?? null,
-          cacheHit: currentRender.cacheHit,
           browserErrors: currentRender.capture.browserErrors,
+          generatedModule: true,
         });
       }
 
@@ -1697,30 +1512,31 @@ export class Orchestrator {
         await this.context.storeRender(project.projectId, 1, initialRender.path, initialRender.sha256, "final");
       }
       if (!finalInspection) finalInspection = budgetExhaustedInspection(supervisor);
-      const finalQualityGate = evaluateQualityGate(
-        finalInspection,
-        currentSpatial,
-        currentRender.capture.browserErrors,
-        this.config,
-      );
-      const coverageComplete =
-        passedTargetIds.size === targets.length &&
-        finalQualityGate.passed;
-      const terminalSupervisorStatus = coverageComplete
-        ? "complete"
-        : qualitySupervisorBudgetStatus(supervisor, this.config) === "running"
-          ? "action-exhausted"
-          : qualitySupervisorBudgetStatus(supervisor, this.config);
+      const finalQualityGate = evaluateQualityGate(finalInspection, currentSpatial, currentRender.capture.browserErrors, this.config);
+      const coverageComplete = passedTargetIds.size === targets.length && finalQualityGate.passed;
+      const acceptedLibraryEntry = coverageComplete
+        ? await this.atlasLibrary.storeAccepted({
+            projectId: project.projectId,
+            revision: currentRevision,
+            prompt: project.prompt,
+            module: source,
+            inspection: finalInspection,
+          })
+        : null;
       supervisor = QualitySupervisorStateSchema.parse({
         ...supervisor,
-        status: terminalSupervisorStatus,
-        currentRevision: currentScene.revision,
+        status: coverageComplete
+          ? "complete"
+          : qualitySupervisorBudgetStatus(supervisor, this.config) === "running"
+            ? "action-exhausted"
+            : qualitySupervisorBudgetStatus(supervisor, this.config),
+        currentRevision,
         currentTargetId: coverageComplete ? undefined : currentTarget.id,
         passedTargetIds: [...passedTargetIds],
         updatedAt: new Date().toISOString(),
       });
       const qaCoverage = QaCoverageSchema.parse({
-        sceneRevision: currentScene.revision,
+        sceneRevision: currentRevision,
         requiredTargets: targets,
         passedTargetIds: [...passedTargetIds],
         unresolvedTargetIds: targets.filter((target) => !passedTargetIds.has(target.id)).map((target) => target.id),
@@ -1740,14 +1556,14 @@ export class Orchestrator {
         generatedAt: new Date().toISOString(),
       });
       await Promise.all([
-        this.artifacts.writeJson(`${relativeRoot}/qa/coverage-revision-${padRevision(currentScene.revision)}.json`, qaCoverage),
+        this.artifacts.writeJson(`${relativeRoot}/qa/coverage-revision-${padRevision(currentRevision)}.json`, qaCoverage),
         this.persistQualitySupervisor(project, supervisor),
       ]);
       project = await this.projects.update(project, {
         status: qaCoverage.complete
           ? options.interactive ? "awaiting_feedback" : "completed"
           : "awaiting_quality",
-        finalRevision: currentScene.revision,
+        finalRevision: currentRevision,
         finalQaVerdict: finalVerdict,
         qaExhausted: !qaCoverage.complete,
       });
@@ -1755,24 +1571,21 @@ export class Orchestrator {
         ? options.interactive ? "awaiting_feedback" : "completed"
         : "awaiting_quality";
       await this.emit(project, outcomeStage, qaCoverage.complete && !options.interactive ? "completed" : "started", {
-        revision: currentScene.revision,
+        revision: currentRevision,
         refinements,
         inspections: inspectionCount,
         requiredTargets: targets.length,
         passedTargets: passedTargetIds.size,
         finalVerdict,
-        exhausted: !qaCoverage.complete,
-        supervisorStatus: supervisor.status,
-        runtimeMinutes: (Date.now() - Date.parse(supervisor.startedAt)) / 60_000,
-        logicalAiCalls: supervisor.logicalAiCalls,
-        targetedResearchRounds: supervisor.targetedResearchRounds,
-        replans: supervisor.replans,
+        generatedModule: true,
+        compiler: this.atlasCompiler.identity,
+        atlasLibraryEntry: acceptedLibraryEntry?.key ?? null,
         finalScores: finalInspection.assessment,
       });
       return {
         project,
         research,
-        plan,
+        plan: source,
         initialScene,
         finalScene: currentScene,
         finalInspection,
@@ -1784,12 +1597,13 @@ export class Orchestrator {
     } catch (error) {
       const message = error instanceof Error ? error.stack ?? error.message : String(error);
       project = await this.projects.update(project, { status: "failed", error: message });
-      await this.emit(project, "failed", "failed", { error: message });
+      await this.emit(project, "failed", "failed", { error: message, generatedModule: true });
       throw error;
     } finally {
       this.sequences.delete(project.runId);
     }
   }
+
 
   private async initializeQualitySupervisor(project: ProjectRecord): Promise<QualitySupervisorState> {
     const existing = await this.context.findQualitySupervisorState(project.projectId);
@@ -1849,155 +1663,104 @@ export class Orchestrator {
     });
   }
 
-  private async withProviderRetries<T>(label: string, operation: () => Promise<T>): Promise<T> {
+  private async withProviderRetries<T>(
+    project: ProjectRecord,
+    stage: WorkflowStage,
+    call: ProviderOperation<T>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const operationId = `${project.runId.slice(0, 8)}-${++this.operationSequence}`;
+    const operationStartedAt = Date.now();
     let lastError: unknown;
     for (let attempt = 1; attempt <= this.config.WORKFLOW_PROVIDER_RETRIES; attempt += 1) {
+      const attemptStartedAt = Date.now();
+      await this.emit(
+        project,
+        stage,
+        "info",
+        {
+          phase: "started",
+          label: call.label,
+          provider: call.provider,
+          destination: call.destination,
+          action: call.action,
+          attempt,
+          maxAttempts: this.config.WORKFLOW_PROVIDER_RETRIES,
+          ...call.detail,
+        },
+        {
+          kind: "operation",
+          operationId,
+          message: `Calling ${call.label} → ${call.destination}`,
+        },
+      );
       try {
-        return await operation();
+        const result = await operation();
+        const resultDetail = call.resultDetail?.(result) ?? {};
+        await this.emit(
+          project,
+          stage,
+          "info",
+          {
+            phase: "completed",
+            label: call.label,
+            provider: call.provider,
+            destination: call.destination,
+            action: call.action,
+            attempt,
+            maxAttempts: this.config.WORKFLOW_PROVIDER_RETRIES,
+            durationMs: Date.now() - attemptStartedAt,
+            totalDurationMs: Date.now() - operationStartedAt,
+            ...call.detail,
+            ...resultDetail,
+          },
+          {
+            kind: "operation",
+            operationId,
+            message: `${call.label} completed`,
+          },
+        );
+        return result;
       } catch (error) {
         lastError = error;
-        if (attempt >= this.config.WORKFLOW_PROVIDER_RETRIES) break;
+        const failed = attempt >= this.config.WORKFLOW_PROVIDER_RETRIES;
         const delay = Math.min(this.config.WORKFLOW_RETRY_BASE_MS * 2 ** (attempt - 1), 30_000);
+        await this.emit(
+          project,
+          stage,
+          "info",
+          {
+            phase: failed ? "failed" : "retrying",
+            label: call.label,
+            provider: call.provider,
+            destination: call.destination,
+            action: call.action,
+            attempt,
+            maxAttempts: this.config.WORKFLOW_PROVIDER_RETRIES,
+            durationMs: Date.now() - attemptStartedAt,
+            totalDurationMs: Date.now() - operationStartedAt,
+            ...(failed ? {} : { retryInMs: delay }),
+            ...describeError(error),
+            ...call.detail,
+          },
+          {
+            kind: "operation",
+            operationId,
+            message: failed
+              ? `${call.label} failed after ${attempt} attempt${attempt === 1 ? "" : "s"}`
+              : `${call.label} failed; retrying in ${delay} ms`,
+          },
+        );
+        if (failed) break;
         if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
     const message = lastError instanceof Error ? lastError.message : String(lastError);
-    throw new Error(`${label} failed after ${this.config.WORKFLOW_PROVIDER_RETRIES} attempts: ${message}`, {
+    throw new Error(`${call.label} failed after ${this.config.WORKFLOW_PROVIDER_RETRIES} attempts: ${message}`, {
       cause: lastError,
     });
   }
 
-  private async resolveAssets(
-    project: ProjectRecord,
-    plan: ScenePlan,
-    revision: number,
-  ): Promise<Map<string, ResolvedAsset>> {
-    const results = new Map<string, ResolvedAsset>();
-    const relativeRoot = this.projects.relativeRoot(project);
-    const lookups = plan.assets.map((spec) => ({
-      spec,
-      assetKey: hashObject({ spec, generator: this.blender.identity, schema: "asset-v2" }),
-    }));
-    const candidates = await this.context.findAssets(lookups, 8);
-    const validation = new Map<string, Promise<AssetGeometry | null>>();
-    const inspect = (record: AssetRecord): Promise<AssetGeometry | null> => {
-      const key = `${record.resolved.path}:${record.resolved.sha256}`;
-      const existing = validation.get(key);
-      if (existing) return existing;
-      const pending = inspectCachedGlb(record.resolved);
-      validation.set(key, pending);
-      return pending;
-    };
-    const recordsToStore: AssetRecord[] = [];
-    const missing: typeof lookups = [];
-
-    await Promise.all(
-      lookups.map(async (lookup) => {
-        const available = candidates.get(lookup.assetKey);
-        const possible = [available?.exact ?? null, ...(available?.related ?? [])].filter(
-          (candidate): candidate is AssetRecord =>
-            candidate !== null &&
-            candidate.resolved.generator === this.blender.identity &&
-            (candidate.resolved.assetKey === lookup.assetKey ||
-              isMetadataCompatible(lookup.spec, candidate.spec)),
-        );
-        const measured = await Promise.all(possible.map(inspect));
-        const cachedIndex = possible.findIndex((candidate, index) => {
-          const geometry = measured[index];
-          if (!geometry) return false;
-          return candidate.resolved.assetKey === lookup.assetKey ||
-            isCompatibleMeasuredAsset(lookup.spec, { ...candidate, resolved: { ...candidate.resolved, geometry } });
-        });
-        const cached = cachedIndex >= 0 ? possible[cachedIndex] : undefined;
-        const geometry = cachedIndex >= 0 ? measured[cachedIndex] : undefined;
-        if (!cached || !geometry) {
-          missing.push(lookup);
-          return;
-        }
-
-        const projectKey = `${relativeRoot}/assets/reused/revision-${padRevision(revision)}/${lookup.spec.id}.glb`;
-        const projectArtifact = await this.artifacts.copyFile(projectKey, cached.resolved.path);
-        const libraryResolved: ResolvedAsset = {
-          ...cached.resolved,
-          assetKey: lookup.assetKey,
-          specId: lookup.spec.id,
-          reused: true,
-          geometry,
-        };
-        results.set(lookup.spec.id, {
-          ...libraryResolved,
-          path: projectArtifact.path,
-          url: projectArtifact.url,
-        });
-        recordsToStore.push({ spec: lookup.spec, resolved: libraryResolved, createdAt: new Date().toISOString() });
-      }),
-    );
-    const lookupOrder = new Map(lookups.map((lookup, index) => [lookup.spec.id, index]));
-    missing.sort((left, right) =>
-      (lookupOrder.get(left.spec.id) ?? Number.MAX_SAFE_INTEGER) -
-      (lookupOrder.get(right.spec.id) ?? Number.MAX_SAFE_INTEGER),
-    );
-
-    if (missing.length > 0) {
-      await this.emit(project, "generating_assets", "started", {
-        count: missing.length,
-        specIds: missing.map(({ spec }) => spec.id),
-      });
-      const outputs = await this.withProviderRetries("Blender/Qwen asset generation", () => this.blender.generateMany(
-        missing.map(({ spec }) => ({
-          spec,
-          outputPath: this.artifacts.absolutePath(
-            `${relativeRoot}/assets/generated/revision-${padRevision(revision)}/${spec.id}.glb`,
-          ),
-        })),
-      ));
-      if (outputs.length !== missing.length) {
-        throw new Error(`Blender returned ${outputs.length} assets for ${missing.length} requests`);
-      }
-      await Promise.all(
-        missing.map(async ({ spec, assetKey }, index) => {
-          const output = outputs[index];
-          if (!output) throw new Error(`Blender returned no output for ${spec.id}`);
-          const generatedKey = `${relativeRoot}/assets/generated/revision-${padRevision(revision)}/${spec.id}.glb`;
-          const projectArtifact = await artifactFromExisting(output.path, generatedKey, this.artifacts);
-          const geometry = await measureGlbGeometry(projectArtifact.path);
-          const libraryKey = `library/assets/${assetKey}/model.glb`;
-          const libraryArtifact = await this.artifacts.copyFile(libraryKey, projectArtifact.path);
-          const libraryResolved: ResolvedAsset = {
-            assetId: assetKey.slice(0, 24),
-            assetKey,
-            specId: spec.id,
-            path: libraryArtifact.path,
-            url: libraryArtifact.url,
-            sha256: libraryArtifact.sha256,
-            reused: false,
-            generator: output.generator,
-            geometry,
-            metadata: output.metadata,
-          };
-          recordsToStore.push({ spec, resolved: libraryResolved, createdAt: new Date().toISOString() });
-          results.set(spec.id, { ...libraryResolved, path: projectArtifact.path, url: projectArtifact.url });
-          await this.artifacts.writeJson(`library/assets/${assetKey}/metadata.json`, {
-            spec,
-            resolved: libraryResolved,
-          });
-        }),
-      );
-      await this.emit(project, "generating_assets", "completed", {
-        count: missing.length,
-        specIds: missing.map(({ spec }) => spec.id),
-      });
-    }
-    recordsToStore.sort((left, right) => left.spec.id.localeCompare(right.spec.id));
-    await this.context.storeAssets(recordsToStore);
-    return new Map(
-      plan.assets.map((spec) => {
-        const resolved = results.get(spec.id);
-        if (!resolved) throw new Error(`Asset resolution produced no result for ${spec.id}`);
-        return [spec.id, resolved];
-      }),
-    );
-  }
 
   private async storeScene(project: ProjectRecord, manifest: SceneManifest): Promise<StoredArtifact> {
     const relativeRoot = this.projects.relativeRoot(project);
@@ -2035,7 +1798,25 @@ export class Orchestrator {
     const capture = cacheHit
       ? { path: outputPath, browserErrors: cached.data.browserErrors }
       : await this.withProviderRetries(
-          "Three.js browser rendering",
+          project,
+          kind === "initial" ? "rendering_initial" : "rendering_final",
+          {
+            label: `Render ${target?.label ?? `revision ${scene.revision}`}`,
+            provider: this.screenshots.identity,
+            destination: this.viewerUrl(manifest.url, target),
+            action: "Playwright page load + screenshot",
+            detail: {
+              revision: scene.revision,
+              targetId: target?.id ?? null,
+              stateId: target?.stateId ?? null,
+              viewId: target?.viewId ?? null,
+              outputPath,
+            },
+            resultDetail: (result) => ({
+              capturedPath: result.path,
+              browserErrors: result.browserErrors,
+            }),
+          },
           () => this.screenshots.capture(this.viewerUrl(manifest.url, target), outputPath),
         );
     const artifact = await artifactFromExisting(
@@ -2095,6 +1876,11 @@ export class Orchestrator {
     stage: WorkflowStage,
     status: RunEvent["status"],
     detail: Record<string, unknown>,
+    options: {
+      kind?: RunEvent["kind"];
+      operationId?: string;
+      message?: string;
+    } = {},
   ): Promise<void> {
     const sequence = this.sequences.get(project.runId) ?? 0;
     this.sequences.set(project.runId, sequence + 1);
@@ -2102,24 +1888,32 @@ export class Orchestrator {
       projectId: project.projectId,
       runId: project.runId,
       sequence,
+      kind: options.kind ?? "stage",
+      ...(options.operationId ? { operationId: options.operationId } : {}),
+      ...(options.message ? { message: options.message } : {}),
       stage,
       status,
       detail,
       createdAt: new Date().toISOString(),
     };
+    const fields = safeLogFields({
+      event: event.kind === "operation" ? "provider_call" : "workflow_stage",
+      projectId: event.projectId,
+      runId: event.runId,
+      sequence: event.sequence,
+      stage: event.stage,
+      status: event.status,
+      ...(event.operationId ? { operationId: event.operationId } : {}),
+      ...event.detail,
+    });
+    const message = event.message ?? `${stage.replaceAll("_", " ")} ${status}`;
+    if (event.kind === "operation" && event.detail.phase === "failed") this.logger.error(fields, message);
+    else if (event.kind === "operation" && event.detail.phase === "retrying") this.logger.warn(fields, message);
+    else this.logger.info(fields, message);
     await Promise.all([this.projects.writeEvent(project, event), this.context.appendEvent(event)]);
   }
 }
 
-async function inspectCachedGlb(asset: ResolvedAsset): Promise<AssetGeometry | null> {
-  try {
-    const buffer = await fs.readFile(asset.path);
-    if (buffer.length <= 20 || sha256(buffer) !== asset.sha256) return null;
-    return measureGlbBuffer(buffer);
-  } catch {
-    return null;
-  }
-}
 
 async function validFile(filePath: string, expectedSha256: string): Promise<boolean> {
   try {
@@ -2142,38 +1936,291 @@ async function artifactFromExisting(
   return artifacts.copyFile(key, sourcePath);
 }
 
-export function buildQaTargets(scene: SceneManifest, maximum: number): QaTarget[] {
-  const requiredViews = scene.procedural
-    ? (scene.procedural.views.filter((view) => view.required).length > 0
-        ? scene.procedural.views.filter((view) => view.required)
-        : scene.procedural.views.slice(0, 1))
-    : [];
-  if (requiredViews.length === 0) return [{ id: "default", label: "Default anatomy view" }];
+function carryForwardDossierEvidence(
+  previous: ResearchDossier[],
+  current: Omit<ResearchDossier, "perspectives" | "readiness" | "generatedAt">,
+): Omit<ResearchDossier, "perspectives" | "readiness" | "generatedAt"> {
+  if (previous.length === 0) return current;
+  const priorStudies = previous.flatMap((dossier) => dossier.objectStudies);
+  return {
+    ...current,
+    brief: {
+      ...current.brief,
+      references: uniqueReferences([
+        ...current.brief.references,
+        ...previous.flatMap((dossier) => dossier.brief.references),
+      ]).slice(0, 64),
+    },
+    objectStudies: current.objectStudies.map((study) => {
+      const exact = priorStudies.find((candidate) => candidate.id === study.id);
+      const currentTokens = studyMatchTokens(study.id, study.name);
+      const semantic = priorStudies
+        .map((candidate) => ({
+          candidate,
+          overlap: [...studyMatchTokens(candidate.id, candidate.name)].filter((token) => currentTokens.has(token)).length,
+        }))
+        .filter((match) => match.overlap >= 2)
+        .sort((left, right) => right.overlap - left.overlap)[0]?.candidate;
+      const prior = exact ?? semantic;
+      if (!prior) return study;
+      return {
+        ...study,
+        referenceImageUrls: [...new Set([...study.referenceImageUrls, ...prior.referenceImageUrls])].slice(0, 6),
+      };
+    }),
+  };
+}
 
-  const targets: QaTarget[] = [];
-  for (const view of requiredViews) {
-    const states = view.stateIds.length > 0
-      ? scene.states.filter((state) => view.stateIds.includes(state.id))
-      : scene.states;
-    if (states.length === 0) {
-      targets.push({ id: `view-${view.id}`, label: view.label, viewId: view.id });
-      continue;
+function studyMatchTokens(id: string, name: string): Set<string> {
+  const ignored = new Set(["and", "the", "with", "from", "system", "standard", "anatomy", "structure", "structures", "major"]);
+  return new Set(
+    `${id} ${name}`
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length >= 4 && !ignored.has(token)),
+  );
+}
+
+export function buildQaTargets(scene: SceneManifest, maximum: number): QaTarget[] {
+  if (scene.module) {
+    const requested = scene.module.definition.qaViews.filter((view) => view.required);
+    const views = requested.length > 0 ? requested : scene.module.definition.qaViews.slice(0, 1);
+    const targets = views.map((view) => ({
+      id: `state-${view.stepId}-view-${view.id}`,
+      label: `${scene.module!.definition.steps.find((step) => step.id === view.stepId)?.title ?? view.stepId} · ${view.label}`,
+      stateId: view.stepId,
+      viewId: view.id,
+    }));
+    if (targets.length > maximum) {
+      throw new Error(
+        `Generated surgical module requires ${targets.length} QA views, above WORKFLOW_MAX_QA_TARGETS=${maximum}.`,
+      );
     }
-    for (const state of states) {
-      targets.push({
-        id: `state-${state.id}-view-${view.id}`,
-        label: `${state.label} · ${view.label}`,
-        stateId: state.id,
-        viewId: view.id,
-      });
-    }
+    return targets;
   }
-  if (targets.length > maximum) {
+  throw new Error("QA cannot run: scene manifest has no compiled surgical module.");
+}
+
+function surgicalModuleManifest(projectId: string, module: CompiledSurgicalModule): SceneManifest {
+  const firstStep = module.definition.steps[0]!;
+  return SceneManifestSchema.parse({
+    schemaVersion: "1.0",
+    projectId,
+    sceneId: `${projectId}-atlas-${String(module.revision).padStart(3, "0")}`,
+    title: module.definition.title,
+    revision: module.revision,
+    environment: {
+      background: module.definition.background,
+      groundColor: "#183b3e",
+      groundSize: 44,
+    },
+    camera: firstStep.camera,
+    lights: [
+      { id: "atlas-host", type: "hemisphere", color: "#fff1df", intensity: 0.65, position: [0, 0, 8] },
+    ],
+    objects: [],
+    module,
+    relationships: [],
+    states: module.definition.steps.map((step) => ({
+      id: step.id,
+      label: step.title,
+      objective: step.teachingFocus,
+      visibleObjects: [],
+      highlightedObjects: [],
+      visibleNodes: module.definition.structures.map((structure) => structure.id),
+      highlightedNodes: [],
+      mutations: [],
+    })),
+    transitions: module.definition.steps.slice(1).map((step, index) => ({
+      from: module.definition.steps[index]!.id,
+      to: step.id,
+      durationMs: 700,
+      kind: "normal",
+      description: `Advance to ${step.title}.`,
+    })),
+    generatedAt: new Date().toISOString(),
+  });
+}
+
+function emptyModuleSpatialReport(revision: number): SpatialReport {
+  return {
+    schemaVersion: "2.0",
+    analyzer: "generated-atlas-module:browser-visual-qa",
+    sceneRevision: revision,
+    sceneBounds: { min: [0, 0, 0], max: [0, 0, 0] },
+    objects: [],
+    issues: [],
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+function validateSurgicalModuleAgainstDossier(
+  module: SurgicalModuleSource,
+  dossier?: ResearchDossier,
+): void {
+  if (!dossier) return;
+  const approved = new Set(dossier.objectStudies.map((study) => study.id));
+  const represented = new Set(module.definition.structures.map((structure) => structure.studyId));
+  const unapproved = [...represented].filter((studyId) => !approved.has(studyId));
+  if (unapproved.length > 0) {
+    throw new Error(`Generated surgical module uses unapproved object-study IDs: ${unapproved.join(", ")}`);
+  }
+  const uncovered = dossier.intentCoverage.filter((coverage) =>
+    !coverage.objectStudyIds.some((studyId) => represented.has(studyId)),
+  );
+  if (uncovered.length > 0) {
     throw new Error(
-      `Procedural QA requires ${targets.length} state/view targets, above WORKFLOW_MAX_QA_TARGETS=${maximum}. Narrow each view.stateIds list or raise the configured safety bound.`,
+      `Generated surgical module does not represent approved requirements: ${uncovered.map((coverage) => coverage.requirement).join(" | ")}`,
     );
   }
-  return targets;
+}
+
+function validateProcedureAtlasContract(prompt: string, module: SurgicalModuleSource): void {
+  if (!/<PatientOperatingContext(?:\s|>)/.test(module.source)) {
+    throw new Error("Every surgical module must render PatientOperatingContext so internal anatomy remains registered to the human body");
+  }
+  if (!/<CalibratedInternalAnatomy(?:\s|>)/.test(module.source)) {
+    throw new Error("Every surgical module must render CalibratedInternalAnatomy so target geometry is shown within registered internal-organ context");
+  }
+  const frameAliases: Record<string, string> = {
+    "central-abdomen": "CentralAbdominalFrame",
+    "right-upper-quadrant": "RightUpperQuadrantFrame",
+    "lower-gastrointestinal": "LowerGastrointestinalFrame",
+    pelvis: "PelvicFrame",
+    "right-groin": "RightGroinFrame",
+    thorax: "ThoracicFrame",
+  };
+  const usedFrames = new Set(
+    module.definition.placements
+      .map((placement) => placement.frameId)
+      .filter((frameId) => frameId !== "whole-body"),
+  );
+  const unmountedFrames = [...usedFrames].filter((frameId) => {
+    const alias = frameAliases[frameId];
+    const usesAlias = alias ? new RegExp(`<${alias}(?:\\s|>)`).test(module.source) : false;
+    const usesGenericFrame = module.source.includes("AnatomicalRegionFrame") && module.source.includes(frameId);
+    return !usesAlias && !usesGenericFrame;
+  });
+  if (unmountedFrames.length > 0) {
+    throw new Error(
+      `Generated source does not mount required anatomical region frame(s): ${unmountedFrames.join(", ")}`,
+    );
+  }
+
+  const registeredStructures = new Map(
+    loadAnatomicalRegistry().structures.map((structure) => [structure.id, structure]),
+  );
+  validateRegisteredStructureFrames(module.source);
+  const unboundRegistrations = module.definition.placements.filter((placement) => {
+    const registration = registeredStructures.get(placement.structureId);
+    if (!registration) return false;
+    return !sourceUsesRegisteredPlacement(module.source, placement.structureId);
+  });
+  if (unboundRegistrations.length > 0) {
+    throw new Error(
+      "Known atlas structures must bind rendered geometry to RegisteredStructureFrame, atlasPoint, atlasSize, or atlasStructure: " +
+      unboundRegistrations.map((placement) => placement.structureId).join(", "),
+    );
+  }
+
+  const normalized = prompt.toLowerCase();
+  const rightHepatobiliary = /(?:right hepatic|hepatic hilum|cholecyst|gallbladder|calot)/.test(normalized);
+  if (!rightHepatobiliary) return;
+  if (/\bHepatobiliaryAtlas\b/.test(module.source)) {
+    throw new Error(
+      "Hepatobiliary target anatomy must be generated from registered placements and research, not rendered from the fixed HepatobiliaryAtlas reference aggregate",
+    );
+  }
+  const requiredJsx = [
+    "PatientOperatingContext",
+    "CalibratedInternalAnatomy",
+    "LaparoscopicCholecystectomyPorts",
+    "RightUpperQuadrantFrame",
+  ];
+  const missing = requiredJsx.filter((component) => !new RegExp(`<${component}(?:\\s|>)`).test(module.source));
+  if (missing.length > 0) {
+    throw new Error(`Right hepatobiliary modules must render the calibrated atlas frames: missing ${missing.join(", ")}`);
+  }
+  const requiredStructureIds = [
+    "liver",
+    "gallbladder",
+    "gallbladder-neck",
+    "cystic-duct",
+    "common-hepatic-duct",
+    "common-bile-duct",
+    "cystic-artery",
+    "hepatocystic-triangle",
+    "rouviere-sulcus",
+    "right-hepatic-artery",
+    "portal-vein",
+    "porta-hepatis",
+  ];
+  const representedStructureIds = new Set(module.definition.structures.map((structure) => structure.id));
+  const missingStructures = requiredStructureIds.filter((structureId) => !representedStructureIds.has(structureId));
+  if (missingStructures.length > 0) {
+    throw new Error(
+      `Right hepatobiliary modules must generate the complete registered operative anatomy: missing ${missingStructures.join(", ")}`,
+    );
+  }
+  if (
+    !/<CalibratedLiverSurface(?:\s|>)/.test(module.source) &&
+    !/<LoftedOrgan(?:\s|>)/.test(module.source) &&
+    !/new\s+THREE\.BufferGeometry\s*\(/.test(module.source)
+  ) {
+    throw new Error(
+      "Right hepatobiliary modules must use the registered CalibratedLiverSurface for classic normal anatomy or author a replacement asymmetric liver with LoftedOrgan/custom THREE.BufferGeometry; ProfiledOrgan and overlapping ellipsoids are not valid liver construction",
+    );
+  }
+  if (!/<SculptedSheet(?:\s|>)/.test(module.source) && !/new\s+THREE\.BufferGeometry\s*\(/.test(module.source)) {
+    throw new Error(
+      "Right hepatobiliary modules must author curved depth-bearing liver-bed/cystic-plate tissue with SculptedSheet or a custom THREE.BufferGeometry",
+    );
+  }
+  if (!module.definition.steps.some((step) => !step.showLabels)) {
+    throw new Error("Right hepatobiliary modules require at least one label-free whole-patient or regional orientation step");
+  }
+  const requiredViews = module.definition.qaViews.filter((view) => view.required);
+  if (requiredViews.length < 3) {
+    throw new Error("Right hepatobiliary modules require at least three QA views: orientation plus two operative close-ups");
+  }
+  const operativeViews = requiredViews.filter((view) =>
+    /(?:subhepatic|operative|calot|cystic|critical|cvs|portal|danger|hilum)/i.test(view.label),
+  );
+  const distantViews = operativeViews.filter((view) => {
+    const step = module.definition.steps.find((candidate) => candidate.id === view.stepId);
+    if (!step) return true;
+    const [px, py, pz] = step.camera.position;
+    const [tx, ty, tz] = step.camera.target;
+    return Math.hypot(px - tx, py - ty, pz - tz) > 3.6;
+  });
+  if (distantViews.length > 0) {
+    throw new Error(
+      `Required operative QA views must use a magnified laparoscopic camera within 3.6 atlas units of target: ${distantViews.map((view) => view.id).join(", ")}`,
+    );
+  }
+  if (operativeViews.length < 2) {
+    throw new Error("Right hepatobiliary modules require at least two magnified operative QA views");
+  }
+  const grasperCount = module.source.match(/<SurgicalGrasper(?:\s|>)/g)?.length ?? 0;
+  if (grasperCount < 2) {
+    throw new Error(
+      "Laparoscopic cholecystectomy modules must render two articulated SurgicalGrasper instances for fundic and infundibular traction; plain tubes are not valid graspers",
+    );
+  }
+  if (!/showHardware\s*=\s*\{[^}]*\}/.test(module.source)) {
+    throw new Error(
+      "LaparoscopicCholecystectomyPorts must bind showHardware to operative state so external trocar bodies are hidden in magnified views",
+    );
+  }
+}
+
+function sourceUsesRegisteredPlacement(source: string, structureId: string): boolean {
+  const escaped = structureId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return [
+    new RegExp(`<RegisteredStructureFrame[^>]*\\bid\\s*=\\s*["']${escaped}["']`, "s"),
+    new RegExp(`\\batlas(?:Point|Size|Structure)\\s*\\(\\s*["']${escaped}["']`),
+  ].some((pattern) => pattern.test(source));
 }
 
 function qaTargetSuffix(target: QaTarget): string {
@@ -2214,14 +2261,6 @@ function mergePreferences(
 function canonicalSceneForQa(manifest: SceneManifest): unknown {
   const { projectId: _projectId, sceneId: _sceneId, revision: _revision, generatedAt: _generatedAt, ...stable } =
     manifest;
-  return {
-    ...stable,
-    objects: stable.objects.map(({ url: _url, ...object }) => object),
-  };
-}
-
-function canonicalSpatialForQa(report: SpatialReport): unknown {
-  const { sceneRevision: _sceneRevision, generatedAt: _generatedAt, ...stable } = report;
   return stable;
 }
 
@@ -2232,7 +2271,6 @@ interface QualityGateResult {
   browserErrors: number;
 }
 
-type RecoveryAction = "none" | "direct-fix" | "targeted-research" | "partial-replan" | "rerender";
 
 export function evaluateQualityGate(
   inspection: Inspection,
@@ -2258,7 +2296,7 @@ export function evaluateQualityGate(
   if (inspection.assessment.confidence < 0.55) {
     reasons.push(`Inspection confidence ${inspection.assessment.confidence.toFixed(3)} is too low for autonomous acceptance.`);
   }
-  if (hardSpatialErrors > 0) reasons.push(`${hardSpatialErrors} deterministic spatial error(s) remain.`);
+  if (hardSpatialErrors > 0) reasons.push(`${hardSpatialErrors} backend spatial error(s) remain.`);
   if (browserErrors.length > 0) reasons.push(`${browserErrors.length} browser/render error(s) remain.`);
   return { passed: reasons.length === 0, reasons, hardSpatialErrors, browserErrors: browserErrors.length };
 }
@@ -2272,7 +2310,7 @@ function rejectFalsePass(inspection: Inspection, reasons: string[]): Inspection 
     verdict: "fix",
     category: "composition",
     issue: `Backend quality gate rejected the visual pass: ${reasons.join(" ")}`,
-    evidence: `${inspection.evidence} The scored and deterministic backend gates remain authoritative for completion.`,
+    evidence: `${inspection.evidence} The scored backend gates remain authoritative for completion.`,
     patch: { kind: "none" },
     assessment: {
       ...inspection.assessment,
@@ -2338,49 +2376,6 @@ function recordQualityInspection(
   };
 }
 
-function chooseRecoveryAction(
-  inspection: Inspection,
-  stalled: boolean,
-  browserErrors: string[],
-  spatial: SpatialReport,
-): RecoveryAction {
-  if (browserErrors.length > 0) return "rerender";
-  if (inspection.verdict === "pass") return "none";
-  if (stalled) return "targeted-research";
-  if (inspection.assessment.recommendedAction === "targeted-research") return "targeted-research";
-  if (inspection.assessment.recommendedAction === "partial-replan") return "partial-replan";
-  if (inspection.patch.kind !== "none") return "direct-fix";
-  if (inspection.assessment.researchQuestions.length > 0 || inspection.assessment.targetStudyIds.length > 0) {
-    return "targeted-research";
-  }
-  if (spatial.issues.some((issue) => issue.severity === "error")) return "partial-replan";
-  return "partial-replan";
-}
-
-function resolveRecoveryStudyIds(
-  inspection: Inspection,
-  plan: ScenePlan,
-  spatial: SpatialReport,
-): string[] {
-  const importedStudies = new Map(plan.objects.map((object) => [object.id, object.assetSpecId]));
-  const proceduralStudies = new Map(plan.procedural?.nodes.map((node) => [node.id, node.studyId]) ?? []);
-  const approved = new Set([
-    ...plan.assets.map((asset) => asset.id),
-    ...(plan.procedural?.nodes.map((node) => node.studyId) ?? []),
-  ]);
-  const explicit = inspection.assessment.targetStudyIds.filter((id) => approved.has(id));
-  if (explicit.length > 0) return [...new Set(explicit)];
-  const issueObjects = spatial.issues
-    .filter((issue) => issue.severity === "error")
-    .flatMap((issue) => issue.objectIds);
-  const inferred = issueObjects.flatMap((id) => {
-    const study = importedStudies.get(id) ?? proceduralStudies.get(id);
-    return study ? [study] : [];
-  });
-  if (inferred.length > 0) return [...new Set(inferred)];
-  const fallback = plan.assets[0]?.id ?? plan.procedural?.nodes[0]?.studyId;
-  return fallback ? [fallback] : [];
-}
 
 function qualitySupervisorBudgetStatus(
   state: QualitySupervisorState,
@@ -2419,61 +2414,7 @@ function budgetExhaustedInspection(state: QualitySupervisorState): Inspection {
       recommendedAction: "partial-replan",
       targetStudyIds: [],
       researchQuestions: [],
-      rationale: "A later resume can continue from durable research, scene, asset, render, and quality checkpoints.",
+      rationale: "A later resume can continue from durable research, compiled-module, render, and quality checkpoints.",
     },
   });
-}
-
-export function validatePlanAgainstDossier(plan: ScenePlan, dossier?: ResearchDossier): void {
-  if (!dossier) return;
-  const studyIds = new Set(dossier.objectStudies.map((study) => study.id));
-  const representedStudyIds = new Set([
-    ...plan.assets.map((asset) => asset.id),
-    ...(plan.procedural?.nodes.map((node) => node.studyId) ?? []),
-  ]);
-  const unresearched = [...representedStudyIds].filter((id) => !studyIds.has(id));
-  if (unresearched.length > 0) {
-    throw new Error(`Scene plan introduced construction without approved object studies: ${unresearched.join(", ")}`);
-  }
-  const uncovered = [...new Set(dossier.intentCoverage.flatMap((coverage) => coverage.objectStudyIds))]
-    .filter((id) => !representedStudyIds.has(id));
-  if (uncovered.length > 0) {
-    throw new Error(`Scene plan omitted approved intent-covering construction: ${uncovered.join(", ")}`);
-  }
-}
-
-function isMetadataCompatible(
-  requested: ScenePlan["assets"][number],
-  candidate: ScenePlan["assets"][number],
-): boolean {
-  if (requested.category.toLowerCase() !== candidate.category.toLowerCase()) return false;
-  if (requested.style.toLowerCase() !== candidate.style.toLowerCase()) return false;
-  const candidateTags = new Set(candidate.tags.map((tag) => tag.toLowerCase()));
-  const overlap = requested.tags.filter((tag) => candidateTags.has(tag.toLowerCase())).length;
-  return overlap >= Math.min(2, requested.tags.length);
-}
-
-function isCompatibleMeasuredAsset(requested: ScenePlan["assets"][number], candidate: AssetRecord): boolean {
-  if (!candidate.resolved.geometry || !isMetadataCompatible(requested, candidate.spec)) return false;
-  const expected = recipeBounds(requested);
-  const expectedSize = boundsSize(expected);
-  const actual = candidate.resolved.geometry.bounds;
-  const actualSize = candidate.resolved.geometry.size;
-  return expectedSize.every((dimension, axis) => {
-    const other = actualSize[axis] ?? 0;
-    if (dimension <= 0.0001 || other <= 0.0001) return Math.abs(dimension - other) <= 0.01;
-    const ratio = other / dimension;
-    const anchorTolerance = Math.max(0.05, dimension * 0.2);
-    return ratio >= 0.8 && ratio <= 1.25 &&
-      Math.abs(actual.min[axis]! - expected.min[axis]!) <= anchorTolerance &&
-      Math.abs(actual.max[axis]! - expected.max[axis]!) <= anchorTolerance;
-  });
-}
-
-export function isCompatibleAssetForGenerator(
-  requested: ScenePlan["assets"][number],
-  candidate: AssetRecord,
-  generatorIdentity: string,
-): boolean {
-  return candidate.resolved.generator === generatorIdentity && isCompatibleMeasuredAsset(requested, candidate);
 }

@@ -1,115 +1,14 @@
-import * as THREE from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { CSS2DObject, CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js";
-import {
-  createProceduralExtrusionGeometry,
-  createProceduralLatheGeometry,
-  createSizedPrimitiveGeometry,
-  createTaperedTubeGeometry,
-} from "../src/scene/procedural-geometry.js";
-
-interface SceneObjectRecord {
-  id: string;
-  url: string;
-  position: [number, number, number];
-  rotation: [number, number, number];
-  scale: [number, number, number];
-  label: string;
-  labelPosition?: [number, number, number];
-  labelVisible: boolean;
-  highlight: boolean;
-}
-
-interface ProceduralMaterialRecord {
-  id: string;
-  color: string;
-  roughness: number;
-  metalness: number;
-  opacity: number;
-  emissive: string;
-  emissiveIntensity: number;
-  side: "front" | "back" | "double";
-}
-
-interface ProceduralPathPointRecord {
-  landmarkId?: string;
-  position?: [number, number, number];
-  offset: [number, number, number];
-  radius?: number;
-}
-
-interface ProceduralNodeBaseRecord {
-  id: string;
-  name: string;
-  materialId: string;
-  parentId?: string;
-  label: string;
-  labelPosition?: [number, number, number];
-  labelVisible: boolean;
-  highlight: boolean;
-  castShadow: boolean;
-  receiveShadow: boolean;
-  position: [number, number, number];
-  rotation: [number, number, number];
-  scale: [number, number, number];
-}
-
-type ProceduralNodeRecord = ProceduralNodeBaseRecord & (
-  | { kind: "primitive"; shape: "box" | "sphere" | "cylinder" | "cone" | "torus" | "capsule"; size: [number, number, number]; segments: number }
-  | { kind: "tube"; points: ProceduralPathPointRecord[]; radius: number; radialSegments: number; tubularSegments: number; closed: boolean }
-  | { kind: "extrusion"; outline: Array<[number, number]>; depth: number; bevel: number }
-  | { kind: "lathe"; profile: Array<[number, number]>; segments: number }
-  | { kind: "instances"; shape: "box" | "sphere" | "cylinder" | "cone"; size: [number, number, number]; segments: number; instances: Array<{ position: [number, number, number]; rotation: [number, number, number]; scale: [number, number, number] }> }
-);
-
-interface ProceduralProgramRecord {
-  coordinateFrame: { metersPerUnit: number };
-  landmarks: Array<{ id: string; position: [number, number, number] }>;
-  materials: ProceduralMaterialRecord[];
-  nodes: ProceduralNodeRecord[];
-  views: Array<{
-    id: string;
-    label: string;
-    position: [number, number, number];
-    target: [number, number, number];
-    fov: number;
-    required: boolean;
-    stateIds: string[];
-  }>;
-}
+export {};
 
 interface Manifest {
   title: string;
-  environment: { background: string; groundColor: string; groundSize: number };
-  camera: { position: [number, number, number]; target: [number, number, number]; fov: number };
-  lights: Array<{ id: string; type: string; color: string; intensity: number; position: [number, number, number] }>;
-  objects: SceneObjectRecord[];
-  procedural?: ProceduralProgramRecord;
-  states: Array<{
-    id: string;
-    label: string;
-    visibleObjects: string[];
-    highlightedObjects: string[];
-    visibleNodes?: string[];
-    highlightedNodes?: string[];
-    cameraViewId?: string;
-    mutations?: Array<{
-      entityId: string;
-      position?: [number, number, number];
-      rotation?: [number, number, number];
-      scale?: [number, number, number];
-      opacity?: number;
-    }>;
-  }>;
-  transitions: Array<{
-    from: string;
-    to: string;
-    durationMs: number;
-    kind?: "normal" | "alternative" | "complication";
-    condition?: string;
-    description?: string;
-  }>;
+  module?: {
+    viewerUrl: string;
+    definition: {
+      steps: Array<{ id: string }>;
+      qaViews: Array<{ id: string; stepId: string }>;
+    };
+  };
 }
 
 interface CheckpointSummary {
@@ -200,7 +99,7 @@ declare global {
     __SEEIN_ERRORS__?: string[];
     __SEEIN_RENDER_STATE__?: {
       assetsLoaded: boolean;
-      proceduralCompiled: boolean;
+      moduleCompiled: boolean;
       cameraSettled: boolean;
       stableFrames: number;
       stateId: string;
@@ -227,7 +126,11 @@ const flow = requiredElement("#flow");
 const modal = requiredElement("#modal") as HTMLDialogElement;
 const consoleStop = requiredElement("#console-stop");
 const workflowElapsed = requiredElement("#workflow-elapsed");
-const activity = requiredElement("#activity");
+const workflowOperation = requiredElement("#workflow-operation");
+const workflowOperationLabel = requiredElement("#workflow-operation-label");
+const workflowOperationRoute = requiredElement("#workflow-operation-route");
+const workflowOperationDetail = requiredElement("#workflow-operation-detail");
+const activity = requiredElement("#activity") as HTMLDetailsElement;
 const activityList = requiredElement("#activity-list");
 
 // Assigned by runGuidedViewer, which can run during module evaluation.
@@ -244,7 +147,7 @@ window.__SEEIN_READY__ = false;
 window.__SEEIN_ERRORS__ = [];
 window.__SEEIN_RENDER_STATE__ = {
   assetsLoaded: false,
-  proceduralCompiled: false,
+  moduleCompiled: false,
   cameraSettled: false,
   stableFrames: 0,
   stateId: "",
@@ -257,6 +160,12 @@ void start().catch((error: unknown) => {
   status.hidden = false;
   status.textContent = `Scene failed: ${message}`;
   status.style.color = "#fca5a5";
+  if (window.__SEEIN_RENDER_STATE__) {
+    window.__SEEIN_RENDER_STATE__.assetsLoaded = true;
+    window.__SEEIN_RENDER_STATE__.moduleCompiled = true;
+    window.__SEEIN_RENDER_STATE__.cameraSettled = true;
+    window.__SEEIN_RENDER_STATE__.stableFrames = 3;
+  }
   window.__SEEIN_READY__ = true;
 });
 
@@ -351,7 +260,7 @@ async function confirmDeleteRun(projectId: string, prompt: string): Promise<void
   title.textContent = "Delete this run?";
   const lede = document.createElement("p");
   lede.className = "modal__lede";
-  lede.textContent = `"${prompt.slice(0, 120)}" and everything it produced: evidence, reference images, 3D models, renders, and history. Reusable models and research shared with other runs are kept. This cannot be undone.`;
+    lede.textContent = `"${prompt.slice(0, 120)}" and everything it produced: evidence, reference images, generated source, renders, and history. Reusable anatomy and research shared with other runs are kept. This cannot be undone.`;
   const error = document.createElement("p");
   error.className = "error-text";
   error.hidden = true;
@@ -439,129 +348,103 @@ async function renderManifest(manifestUrl: string): Promise<void> {
   if (!response.ok) throw new Error(`Manifest request failed: ${response.status}`);
   const manifest = (await response.json()) as Manifest;
   title.textContent = manifest.title;
+  if (manifest.module) return renderAtlasModule(manifest);
 
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(manifest.environment.background);
-  const sceneRoot = new THREE.Group();
-  sceneRoot.name = "SceneRoot";
-  scene.add(sceneRoot);
+  throw new Error("Scene manifest has no compiled surgical module.");
+}
 
-  const camera = new THREE.PerspectiveCamera(manifest.camera.fov, innerWidth / innerHeight, 0.01, 1000);
-  camera.position.fromArray(manifest.camera.position);
-
-  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-  renderer.setSize(innerWidth, innerHeight);
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.shadowMap.enabled = true;
-  viewport.append(renderer.domElement);
-
-  const labelRenderer = new CSS2DRenderer();
-  labelRenderer.setSize(innerWidth, innerHeight);
-  labelRenderer.domElement.style.position = "fixed";
-  labelRenderer.domElement.style.inset = "0";
-  labelRenderer.domElement.style.pointerEvents = "none";
-  viewport.append(labelRenderer.domElement);
-
-  const controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.fromArray(manifest.camera.target);
-  controls.enableDamping = true;
-  controls.update();
-
-  addEnvironment(sceneRoot, manifest);
-  const objectRoots = new Map<string, THREE.Object3D>();
-  const loader = new GLTFLoader();
-  await Promise.all(
-    manifest.objects.map(async (record) => {
-      try {
-        const gltf = await loader.loadAsync(record.url);
-        const root = gltf.scene;
-        root.name = record.id;
-        root.position.fromArray(record.position);
-        root.rotation.fromArray([...record.rotation, "XYZ"]);
-        root.scale.fromArray(record.scale);
-        if (record.highlight) setHighlight(root, true);
-        const label = document.createElement("div");
-        label.className = "scene-label";
-        label.textContent = record.label;
-        label.hidden = !record.labelVisible;
-        const labelObject = new CSS2DObject(label);
-        const bounds = new THREE.Box3().setFromObject(root);
-        labelObject.position.set(0, Math.max(0.6, bounds.max.y - bounds.min.y + 0.25), 0);
-        root.add(labelObject);
-        sceneRoot.add(root);
-        objectRoots.set(record.id, root);
-      } catch (error) {
-        const message = `${record.id}: ${error instanceof Error ? error.message : String(error)}`;
-        window.__SEEIN_ERRORS__?.push(message);
-        const fallback = new THREE.Mesh(
-          new THREE.BoxGeometry(0.5, 0.5, 0.5),
-          new THREE.MeshStandardMaterial({ color: "#ef4444", wireframe: true }),
-        );
-        fallback.position.fromArray(record.position);
-        fallback.name = record.id;
-        sceneRoot.add(fallback);
-        objectRoots.set(record.id, fallback);
-      }
-    }),
-  );
-  if (window.__SEEIN_RENDER_STATE__) window.__SEEIN_RENDER_STATE__.assetsLoaded = true;
-
-  if (manifest.procedural) buildProceduralProgram(manifest.procedural, sceneRoot, objectRoots);
-  if (window.__SEEIN_RENDER_STATE__) window.__SEEIN_RENDER_STATE__.proceduralCompiled = true;
-
+async function renderAtlasModule(manifest: Manifest): Promise<void> {
+  if (!manifest.module) throw new Error("Atlas module metadata is missing");
+  const sceneHead = title.closest(".scene-head") as HTMLElement | null;
+  if (sceneHead) sceneHead.style.display = "none";
   const query = new URLSearchParams(location.search);
-  const requestedView = query.get("view") ?? "";
-  const requestedState = query.get("state") ?? "";
-  const applyView = (viewId: string): void => {
-    const view = manifest.procedural?.views.find((candidate) => candidate.id === viewId);
-    if (!view) return;
-    camera.position.fromArray(view.position);
-    camera.fov = view.fov;
-    camera.updateProjectionMatrix();
-    controls.target.fromArray(view.target);
-    controls.update();
-    if (window.__SEEIN_RENDER_STATE__) {
-      window.__SEEIN_RENDER_STATE__.viewId = viewId;
-      window.__SEEIN_RENDER_STATE__.cameraSettled = true;
-      window.__SEEIN_RENDER_STATE__.stableFrames = 0;
-    }
-  };
-  const selectedView = manifest.procedural?.views.find((view) => view.id === requestedView)
-    ?? manifest.procedural?.views.find((view) => view.required)
-    ?? manifest.procedural?.views[0];
-  if (selectedView) applyView(selectedView.id);
-  else if (window.__SEEIN_RENDER_STATE__) window.__SEEIN_RENDER_STATE__.cameraSettled = true;
+  const moduleUrl = new URL(manifest.module.viewerUrl, location.href);
+  const stateId = query.get("state");
+  const viewId = query.get("view");
+  if (stateId) moduleUrl.searchParams.set("state", stateId);
+  if (viewId) moduleUrl.searchParams.set("view", viewId);
 
-  buildStateControls(manifest, objectRoots, applyView, requestedState, requestedView);
-  status.textContent = window.__SEEIN_ERRORS__?.length
-    ? `Rendered with ${window.__SEEIN_ERRORS__.length} asset error(s)`
-    : `${manifest.objects.length} anatomical assets · ${manifest.procedural?.nodes.length ?? 0} procedural structures ready`;
+  const frame = document.createElement("iframe");
+  frame.title = manifest.title;
+  frame.src = moduleUrl.toString();
+  frame.style.position = "fixed";
+  frame.style.inset = "0";
+  frame.style.width = "100%";
+  frame.style.height = "100%";
+  frame.style.border = "0";
+  frame.style.background = "#082a2e";
+  frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
+  viewport.replaceChildren(frame);
+  status.textContent = "Loading generated surgical atlas module…";
 
-  const renderFrame = (): void => {
-    controls.update();
-    renderer.render(scene, camera);
-    labelRenderer.render(scene, camera);
-    if (window.__SEEIN_RENDER_STATE__?.cameraSettled) window.__SEEIN_RENDER_STATE__.stableFrames += 1;
-    requestAnimationFrame(renderFrame);
-  };
-  renderFrame();
-  await waitForStableFrames(2);
-  window.__SEEIN_READY__ = true;
-
-  addEventListener("resize", () => {
-    camera.aspect = innerWidth / innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(innerWidth, innerHeight);
-    labelRenderer.setSize(innerWidth, innerHeight);
+  await new Promise<void>((resolve, reject) => {
+    // The calibrated patient shell, complete internal context, and operative
+    // atlas intentionally compile substantially more geometry than the old
+    // placeholder viewer. Software-rendered Chromium can need more than 28 s
+    // on a cold page even though the scene is healthy, so reserve enough time
+    // for the child to report real frame stability.
+    const deadline = Date.now() + 50_000;
+    const poll = () => {
+      try {
+        const child = frame.contentWindow;
+        if (child?.__SEEIN_READY__) {
+          const childState = child.__SEEIN_RENDER_STATE__;
+          const childErrors = child.__SEEIN_ERRORS__ ?? [];
+          window.__SEEIN_ERRORS__?.push(...childErrors);
+          if (window.__SEEIN_RENDER_STATE__) {
+            window.__SEEIN_RENDER_STATE__ = childState
+              ? { ...childState }
+              : {
+                  assetsLoaded: true,
+                  moduleCompiled: true,
+                  cameraSettled: true,
+                  stableFrames: 3,
+                  stateId: stateId ?? "",
+                  viewId: viewId ?? "",
+                };
+          }
+          resolve();
+          return;
+        }
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(new Error("Generated surgical module did not reach render readiness within 50 seconds"));
+        return;
+      }
+      requestAnimationFrame(poll);
+    };
+    frame.addEventListener("error", () => reject(new Error("Generated surgical module iframe failed to load")), { once: true });
+    requestAnimationFrame(poll);
   });
+
+  status.textContent = window.__SEEIN_ERRORS__?.length
+    ? `Generated module rendered with ${window.__SEEIN_ERRORS__.length} browser error(s)`
+    : `${manifest.module.definition.steps.length} surgical states · live generated module`;
+  window.__SEEIN_READY__ = true;
 }
 
 interface ProjectEvent {
+  kind?: "stage" | "operation";
+  operationId?: string;
+  message?: string;
   stage?: string;
   status?: string;
   detail?: Record<string, unknown>;
   createdAt?: string;
+}
+
+interface ActivityRow {
+  key: string;
+  kind: "stage" | "operation";
+  stage: string;
+  status: string;
+  message: string | undefined;
+  detail: Record<string, unknown> | undefined;
+  at: string | undefined;
+  startedAt: string | undefined;
 }
 
 /**
@@ -576,8 +459,6 @@ const STAGE_STORY: Record<string, { doing: string; done: string }> = {
   researching: { doing: "Researching anatomy and operative relationships", done: "Anatomical evidence gathered" },
   auditing_research: { doing: "Auditing anatomical evidence", done: "Anatomical evidence checked" },
   planning: { doing: "Designing the anatomy construction", done: "Anatomy construction designed" },
-  generating_assets: { doing: "Modelling anatomical structures", done: "Anatomical structures modelled" },
-  resolving_assets: { doing: "Resolving reusable anatomy", done: "3D anatomy ready" },
   assembling: { doing: "Assembling anatomical relationships", done: "Anatomy assembled" },
   rendering_initial: { doing: "Rendering the first operative view", done: "First operative view rendered" },
   rendering_final: { doing: "Rendering the corrected anatomy", done: "Corrected anatomy rendered" },
@@ -630,6 +511,60 @@ function storyDetail(stage: string, detail: Record<string, unknown> | undefined)
   return bits.slice(0, 2).join(" · ");
 }
 
+function operationPhase(event: ProjectEvent): string {
+  return typeof event.detail?.phase === "string" ? event.detail.phase : "started";
+}
+
+function operationHeadline(row: ActivityRow): string {
+  const label = typeof row.detail?.label === "string" ? row.detail.label : row.message ?? "External call";
+  if (row.status === "completed") return `${label} completed`;
+  if (row.status === "retrying") return `${label} failed — retry scheduled`;
+  if (row.status === "failed") return `${label} failed`;
+  return `Calling ${label}`;
+}
+
+function durationLabel(value: unknown): string {
+  if (typeof value !== "number") return "";
+  if (value < 1000) return `${Math.round(value)} ms`;
+  if (value < 60_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)} s`;
+  return `${Math.floor(value / 60_000)}m ${Math.round((value % 60_000) / 1000)}s`;
+}
+
+function operationMeta(detail: Record<string, unknown> | undefined, includeRoute = true): string {
+  if (!detail) return "";
+  const bits: string[] = [];
+  if (includeRoute && typeof detail.action === "string" && typeof detail.destination === "string") {
+    bits.push(`${detail.action} → ${detail.destination}`);
+  } else if (includeRoute && typeof detail.destination === "string") {
+    bits.push(detail.destination);
+  }
+  if (typeof detail.provider === "string") bits.push(detail.provider);
+  if (typeof detail.attempt === "number") {
+    bits.push(`attempt ${detail.attempt}/${typeof detail.maxAttempts === "number" ? detail.maxAttempts : "?"}`);
+  }
+  const duration = durationLabel(detail.totalDurationMs ?? detail.durationMs);
+  if (duration) bits.push(duration);
+  if (typeof detail.retryInMs === "number") bits.push(`retry in ${durationLabel(detail.retryInMs)}`);
+  if (typeof detail.error === "string") bits.push(firstUsefulLine(detail.error));
+  return bits.join(" · ");
+}
+
+function renderLiveOperation(rows: ActivityRow[]): void {
+  const operations = rows.filter((row) => row.kind === "operation");
+  const current = operations.find((row) => row.status === "started" || row.status === "retrying") ?? operations[0];
+  if (!current) {
+    workflowOperation.hidden = true;
+    return;
+  }
+  workflowOperation.hidden = false;
+  workflowOperation.dataset.phase = current.status;
+  workflowOperationLabel.textContent = operationHeadline(current);
+  const action = typeof current.detail?.action === "string" ? current.detail.action : "External operation";
+  const destination = typeof current.detail?.destination === "string" ? current.detail.destination : "provider";
+  workflowOperationRoute.textContent = `${action} → ${destination}`;
+  workflowOperationDetail.textContent = operationMeta(current.detail, false);
+}
+
 function relativeTime(iso: string | undefined, now: number): string {
   if (!iso) return "";
   const seconds = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
@@ -654,18 +589,37 @@ async function renderActivity(projectId: string): Promise<void> {
   if (!response?.ok) return;
   const { events } = (await response.json()) as { events: ProjectEvent[] };
 
-  // A stage emits "started" then "completed". Collapse each pair into one line so
-  // the reader sees a list of things that happened, not a transaction log.
-  const merged = new Map<string, { stage: string; status: string; detail: Record<string, unknown> | undefined; at: string | undefined; startedAt: string | undefined }>();
+  // Stages collapse into one line, while each provider operation keeps its own row.
+  // This makes parallel research calls, source compilation, and render failures visible.
+  const stages = new Map<string, ActivityRow>();
+  const operations = new Map<string, ActivityRow>();
   for (const event of events) {
     const stage = event.stage ?? "step";
-    const existing = merged.get(stage);
+    if (event.kind === "operation") {
+      const key = event.operationId ?? `operation-${event.createdAt ?? operations.size}`;
+      const existing = operations.get(key);
+      operations.set(key, {
+        key,
+        kind: "operation",
+        stage,
+        status: operationPhase(event),
+        message: event.message,
+        detail: event.detail,
+        at: event.createdAt,
+        startedAt: existing?.startedAt ?? event.createdAt,
+      });
+      continue;
+    }
+    const existing = stages.get(stage);
     if (event.status === "started") {
-      merged.set(stage, { stage, status: "started", detail: undefined, at: event.createdAt, startedAt: event.createdAt });
+      stages.set(stage, { key: stage, kind: "stage", stage, status: "started", message: undefined, detail: undefined, at: event.createdAt, startedAt: event.createdAt });
     } else {
-      merged.set(stage, {
+      stages.set(stage, {
+        key: stage,
+        kind: "stage",
         stage,
         status: event.status ?? "info",
+        message: undefined,
         detail: event.detail,
         at: event.createdAt,
         startedAt: existing?.startedAt,
@@ -674,19 +628,21 @@ async function renderActivity(projectId: string): Promise<void> {
   }
 
   const now = Date.now();
-  const rows = [...merged.values()].sort((a, b) => (b.at ?? "").localeCompare(a.at ?? "")).slice(0, 8);
+  const rows = [...stages.values(), ...operations.values()]
+    .sort((a, b) => (b.at ?? "").localeCompare(a.at ?? ""));
+  renderLiveOperation(rows);
   if (rows.length === 0) return;
   activityList.replaceChildren(
-    ...rows.map((row) => {
+    ...rows.slice(0, 14).map((row) => {
       const item = document.createElement("li");
       item.className = "step";
       item.dataset.status = row.status;
       const headline = document.createElement("div");
       headline.className = "step__what";
-      headline.textContent = storyFor(row.stage, row.status);
+      headline.textContent = row.kind === "operation" ? operationHeadline(row) : storyFor(row.stage, row.status);
       const meta = document.createElement("div");
       meta.className = "step__meta";
-      const detail = storyDetail(row.stage, row.detail);
+      const detail = row.kind === "operation" ? operationMeta(row.detail) : storyDetail(row.stage, row.detail);
       const took = row.startedAt && row.at && row.status !== "started"
         ? `${Math.max(1, Math.round((Date.parse(row.at) - Date.parse(row.startedAt)) / 1000))}s`
         : "";
@@ -1326,271 +1282,6 @@ function showWorkflowError(error: unknown): void {
   status.style.color = "#fca5a5";
 }
 
-function buildProceduralProgram(
-  program: ProceduralProgramRecord,
-  sceneRoot: THREE.Group,
-  objectRoots: Map<string, THREE.Object3D>,
-): void {
-  const programRoot = new THREE.Group();
-  programRoot.name = "ProceduralRoot";
-  programRoot.scale.setScalar(program.coordinateFrame.metersPerUnit);
-  sceneRoot.add(programRoot);
-
-  const landmarks = new Map(program.landmarks.map((landmark) => [landmark.id, landmark.position]));
-  const materials = new Map(program.materials.map((record) => [record.id, record]));
-  const built = new Map<string, THREE.Object3D>();
-
-  for (const node of program.nodes) {
-    const materialRecord = materials.get(node.materialId);
-    if (!materialRecord) throw new Error(`Procedural node ${node.id} uses missing material ${node.materialId}`);
-    const material = createProceduralMaterial(materialRecord);
-    const root = createProceduralNode(node, material, landmarks);
-    root.name = node.id;
-    root.position.fromArray(node.position);
-    root.rotation.fromArray([...node.rotation, "XYZ"]);
-    root.scale.fromArray(node.scale);
-    root.traverse((child) => {
-      if (!(child instanceof THREE.Mesh)) return;
-      child.castShadow = node.castShadow;
-      child.receiveShadow = node.receiveShadow;
-    });
-    if (node.highlight) setHighlight(root, true);
-    addSceneLabel(root, node.label, node.labelVisible, node.labelPosition);
-    built.set(node.id, root);
-    objectRoots.set(node.id, root);
-  }
-
-  for (const node of program.nodes) {
-    const root = built.get(node.id)!;
-    const parent = node.parentId ? built.get(node.parentId) : undefined;
-    (parent ?? programRoot).add(root);
-  }
-}
-
-function createProceduralMaterial(record: ProceduralMaterialRecord): THREE.MeshPhysicalMaterial {
-  return new THREE.MeshPhysicalMaterial({
-    color: record.color,
-    roughness: record.roughness,
-    metalness: record.metalness,
-    opacity: record.opacity,
-    transparent: record.opacity < 0.999,
-    depthWrite: record.opacity >= 0.999,
-    emissive: record.emissive,
-    emissiveIntensity: record.emissiveIntensity,
-    side: record.side === "double" ? THREE.DoubleSide : record.side === "back" ? THREE.BackSide : THREE.FrontSide,
-    clearcoat: record.metalness > 0.35 ? 0.18 : 0.04,
-    clearcoatRoughness: Math.min(1, record.roughness + 0.1),
-  });
-}
-
-function createProceduralNode(
-  node: ProceduralNodeRecord,
-  material: THREE.Material,
-  landmarks: Map<string, [number, number, number]>,
-): THREE.Object3D {
-  if (node.kind === "instances") {
-    const geometry = createSizedPrimitiveGeometry(node.shape, node.size, node.segments);
-    const mesh = new THREE.InstancedMesh(geometry, material, node.instances.length);
-    const matrix = new THREE.Matrix4();
-    const quaternion = new THREE.Quaternion();
-    for (const [index, instance] of node.instances.entries()) {
-      quaternion.setFromEuler(new THREE.Euler(...instance.rotation, "XYZ"));
-      matrix.compose(new THREE.Vector3(...instance.position), quaternion, new THREE.Vector3(...instance.scale));
-      mesh.setMatrixAt(index, matrix);
-    }
-    mesh.instanceMatrix.needsUpdate = true;
-    return mesh;
-  }
-
-  let geometry: THREE.BufferGeometry;
-  if (node.kind === "primitive") {
-    geometry = createSizedPrimitiveGeometry(node.shape, node.size, node.segments);
-  } else if (node.kind === "tube") {
-    const points = node.points.map((point, index) => {
-      const source = point.position ?? (point.landmarkId ? landmarks.get(point.landmarkId) : undefined);
-      if (!source) throw new Error(`Tube ${node.id} point ${index} has no resolvable coordinate`);
-      return {
-        position: new THREE.Vector3(source[0] + point.offset[0], source[1] + point.offset[1], source[2] + point.offset[2]),
-        radius: point.radius ?? node.radius,
-      };
-    });
-    geometry = createTaperedTubeGeometry(points, node.tubularSegments, node.radialSegments, node.closed);
-  } else if (node.kind === "extrusion") {
-    geometry = createProceduralExtrusionGeometry(node.outline, node.depth, node.bevel);
-  } else {
-    geometry = createProceduralLatheGeometry(node.profile, node.segments);
-  }
-  geometry.computeVertexNormals();
-  return new THREE.Mesh(geometry, material);
-}
-
-function addSceneLabel(
-  root: THREE.Object3D,
-  text: string,
-  visible: boolean,
-  position?: [number, number, number],
-): void {
-  const label = document.createElement("div");
-  label.className = "scene-label";
-  label.textContent = text;
-  label.hidden = !visible;
-  const labelObject = new CSS2DObject(label);
-  const bounds = new THREE.Box3().setFromObject(root);
-  const height = bounds.isEmpty() ? 0.5 : bounds.max.y - bounds.min.y;
-  if (position) labelObject.position.fromArray(position);
-  else labelObject.position.set(0, Math.max(0.25, height / 2 + 0.15), 0);
-  root.add(labelObject);
-}
-
-async function waitForStableFrames(required: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const check = (): void => {
-      if ((window.__SEEIN_RENDER_STATE__?.stableFrames ?? 0) >= required) resolve();
-      else requestAnimationFrame(check);
-    };
-    check();
-  });
-}
-
-function addEnvironment(root: THREE.Group, manifest: Manifest): void {
-  const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(manifest.environment.groundSize, manifest.environment.groundSize),
-    new THREE.MeshStandardMaterial({ color: manifest.environment.groundColor, roughness: 0.92 }),
-  );
-  ground.rotation.x = -Math.PI / 2;
-  ground.receiveShadow = true;
-  ground.name = "Ground";
-  root.add(ground);
-  for (const record of manifest.lights) {
-    let light: THREE.Light;
-    if (record.type === "ambient") light = new THREE.AmbientLight(record.color, record.intensity);
-    else if (record.type === "hemisphere") light = new THREE.HemisphereLight(record.color, "#1e293b", record.intensity);
-    else if (record.type === "point") light = new THREE.PointLight(record.color, record.intensity);
-    else light = new THREE.DirectionalLight(record.color, record.intensity);
-    light.name = record.id;
-    light.position.fromArray(record.position);
-    light.castShadow = record.type === "directional" || record.type === "point";
-    root.add(light);
-  }
-}
-
-function buildStateControls(
-  manifest: Manifest,
-  objects: Map<string, THREE.Object3D>,
-  applyView: (viewId: string) => void,
-  requestedState = "",
-  lockedViewId = "",
-): void {
-  const initialState = manifest.states.find((state) => state.id === requestedState) ?? manifest.states[0];
-  let activeStateId = initialState?.id ?? "";
-  let animationToken = 0;
-  const baseTransforms = new Map([...objects].map(([id, object]) => [id, {
-    position: object.position.clone(),
-    quaternion: object.quaternion.clone(),
-    scale: object.scale.clone(),
-  }]));
-  const applyState = (stateId: string, immediate = false): void => {
-    const state = manifest.states.find((candidate) => candidate.id === stateId);
-    if (!state) return;
-    const visible = new Set([...state.visibleObjects, ...(state.visibleNodes ?? [])]);
-    const highlighted = new Set([...state.highlightedObjects, ...(state.highlightedNodes ?? [])]);
-    for (const button of stateControls.querySelectorAll("button")) {
-      button.setAttribute("aria-pressed", String(button.dataset.state === stateId));
-    }
-    const duration = immediate
-      ? 0
-      : manifest.transitions.find((transition) => transition.from === activeStateId && transition.to === stateId)?.durationMs ?? 350;
-    activeStateId = stateId;
-    if (window.__SEEIN_RENDER_STATE__) window.__SEEIN_RENDER_STATE__.stateId = stateId;
-    if (state.cameraViewId && !lockedViewId) applyView(state.cameraViewId);
-    animationToken += 1;
-    const token = animationToken;
-    const mutations = new Map((state.mutations ?? []).map((mutation) => [mutation.entityId, mutation]));
-    const starting = new Map([...objects].map(([id, object]) => [id, {
-      opacity: Number(object.userData.seeinOpacityMultiplier ?? (object.visible ? 1 : 0)),
-      position: object.position.clone(),
-      quaternion: object.quaternion.clone(),
-      scale: object.scale.clone(),
-    }]));
-    for (const object of objects.values()) object.visible = true;
-    const startedAt = performance.now();
-    const tick = (now: number): void => {
-      if (token !== animationToken) return;
-      const progress = duration === 0 ? 1 : Math.min(1, (now - startedAt) / duration);
-      const eased = 1 - Math.pow(1 - progress, 3);
-      for (const [id, object] of objects) {
-        const start = starting.get(id);
-        const base = baseTransforms.get(id);
-        if (!start || !base) continue;
-        const mutation = mutations.get(id);
-        const targetOpacity = visible.has(id) ? (mutation?.opacity ?? 1) : 0;
-        const targetPosition = mutation?.position ? new THREE.Vector3(...mutation.position) : base.position;
-        const targetQuaternion = mutation?.rotation
-          ? new THREE.Quaternion().setFromEuler(new THREE.Euler(...mutation.rotation, "XYZ"))
-          : base.quaternion;
-        const targetScale = mutation?.scale ? new THREE.Vector3(...mutation.scale) : base.scale;
-        setOpacity(object, start.opacity + (targetOpacity - start.opacity) * eased);
-        object.position.copy(start.position).lerp(targetPosition, eased);
-        object.quaternion.copy(start.quaternion).slerp(targetQuaternion, eased);
-        object.scale.copy(start.scale).lerp(targetScale, eased);
-        if (progress === 1) {
-          object.visible = targetOpacity > 0;
-          setOpacity(object, targetOpacity);
-          setHighlight(object, highlighted.has(id));
-        }
-      }
-      if (progress < 1) requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-  };
-  for (const [index, state] of manifest.states.entries()) {
-    const button = document.createElement("button");
-    button.textContent = state.label;
-    button.dataset.state = state.id;
-    button.setAttribute("aria-pressed", String(index === 0));
-    button.addEventListener("click", () => applyState(state.id));
-    stateControls.append(button);
-  }
-  if (initialState) applyState(initialState.id, true);
-}
-
-function setHighlight(root: THREE.Object3D, enabled: boolean): void {
-  root.traverse((node) => {
-    if (!(node instanceof THREE.Mesh)) return;
-    const materials = Array.isArray(node.material) ? node.material : [node.material];
-    for (const material of materials) {
-      if (!(material instanceof THREE.MeshStandardMaterial)) continue;
-      if (!material.userData.seeinOriginalEmissive) {
-        material.userData.seeinOriginalEmissive = material.emissive.getHexString();
-        material.userData.seeinOriginalEmissiveIntensity = material.emissiveIntensity;
-      }
-      material.emissive.set(enabled ? "#0ea5e9" : `#${String(material.userData.seeinOriginalEmissive)}`);
-      material.emissiveIntensity = enabled
-        ? Math.max(0.25, Number(material.userData.seeinOriginalEmissiveIntensity ?? 0))
-        : Number(material.userData.seeinOriginalEmissiveIntensity ?? 0);
-    }
-  });
-}
-
-function setOpacity(root: THREE.Object3D, opacity: number): void {
-  root.userData.seeinOpacityMultiplier = opacity;
-  root.traverse((node) => {
-    if (!(node instanceof THREE.Mesh)) return;
-    const materials = Array.isArray(node.material) ? node.material : [node.material];
-    for (const material of materials) {
-      if (material.userData.seeinBaseOpacity === undefined) {
-        material.userData.seeinBaseOpacity = material.opacity;
-        material.userData.seeinBaseDepthWrite = material.depthWrite;
-      }
-      const baseOpacity = Number(material.userData.seeinBaseOpacity ?? 1);
-      material.opacity = baseOpacity * opacity;
-      material.transparent = material.opacity < 0.999;
-      material.depthWrite = opacity >= 0.999
-        ? Boolean(material.userData.seeinBaseDepthWrite)
-        : false;
-    }
-  });
-}
 
 function requiredElement(selector: string): HTMLElement {
   const element = document.querySelector<HTMLElement>(selector);

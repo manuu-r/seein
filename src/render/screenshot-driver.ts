@@ -16,7 +16,7 @@ export interface ScreenshotDriver {
 }
 
 export class PlaywrightScreenshotDriver implements ScreenshotDriver {
-  readonly identity = "playwright-chromium:explicit-readiness-v2";
+  readonly identity = "playwright-chromium:explicit-readiness-v3";
   private browserPromise: Promise<Browser> | null = null;
 
   constructor(private readonly config: Config) {}
@@ -33,30 +33,38 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
       page.on("pageerror", (error) => consoleErrors.push(error.message));
       await page.goto(viewerUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
       await page.waitForFunction(() => (window as unknown as { __SEEIN_READY__?: boolean }).__SEEIN_READY__ === true, undefined, {
-        timeout: 30_000,
+        timeout: 60_000,
       });
       await page.waitForFunction(
         () => {
           const state = (window as unknown as {
             __SEEIN_RENDER_STATE__?: {
               assetsLoaded?: boolean;
-              proceduralCompiled?: boolean;
+              moduleCompiled?: boolean;
               cameraSettled?: boolean;
               stableFrames?: number;
             };
           }).__SEEIN_RENDER_STATE__;
           return state?.assetsLoaded === true &&
-            state.proceduralCompiled === true &&
+            state.moduleCompiled === true &&
             state.cameraSettled === true &&
             (state.stableFrames ?? 0) >= 2;
         },
         undefined,
-        { timeout: 30_000 },
+        { timeout: 60_000 },
       );
       const viewerErrors = await page.evaluate(
         () => (window as unknown as { __SEEIN_ERRORS__?: string[] }).__SEEIN_ERRORS__ ?? [],
       );
       await page.screenshot({ path: outputPath, type: "png" });
+      const readinessError = viewerErrors.find((message) => /did not reach render readiness within/i.test(message));
+      if (readinessError) {
+        // Treat a cold-start readiness timeout as a renderer/provider failure,
+        // not as anatomical evidence. The orchestrator retries the Chromium
+        // capture with warm HTTP and loader caches before considering a source
+        // revision, so Gemini never judges a timeout screenshot as anatomy.
+        throw new Error(readinessError);
+      }
       return { path: outputPath, browserErrors: [...consoleErrors, ...viewerErrors] };
     } finally {
       await page.close();
@@ -81,23 +89,6 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
     return this.browserPromise;
   }
 }
-
-export class PlaceholderScreenshotDriver implements ScreenshotDriver {
-  readonly identity = "placeholder-png:v1";
-
-  async capture(_viewerUrl: string, outputPath: string): Promise<ScreenshotResult> {
-    await fs.mkdir(path.dirname(outputPath), { recursive: true });
-    await fs.writeFile(outputPath, PLACEHOLDER_PNG);
-    return { path: outputPath, browserErrors: [] };
-  }
-
-  async close(): Promise<void> {}
-}
-
-const PLACEHOLDER_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-  "base64",
-);
 
 function resolveChromiumPath(configured: string): string | undefined {
   const candidates = [

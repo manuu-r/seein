@@ -1,15 +1,37 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import Fastify from "fastify";
+import Fastify, { LogController } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { createAppServices } from "./app.js";
 import { loadConfig } from "./config.js";
 import { CreateProjectRequestSchema } from "./contracts.js";
 
 const config = loadConfig();
-const services = await createAppServices(config);
-const app = Fastify({ logger: true });
+const app = Fastify({
+  logger: {
+    level: config.LOG_LEVEL,
+    base: { service: "seein-core" },
+    redact: {
+      paths: ["req.headers.authorization", "headers.authorization", "authorization", "apiKey", "*.apiKey"],
+      censor: "[redacted]",
+    },
+    ...(config.LOG_FORMAT === "pretty"
+      ? {
+          transport: {
+            target: "pino-pretty",
+            options: {
+              colorize: process.stdout.isTTY,
+              translateTime: "SYS:yyyy-mm-dd HH:MM:ss.l",
+              ignore: "pid,hostname,service",
+            },
+          },
+        }
+      : {}),
+  },
+  logController: new LogController({ disableRequestLogging: !config.LOG_HTTP_REQUESTS }),
+});
+const services = await createAppServices(config, { logger: app.log });
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = moduleDirectory.endsWith(path.join("dist", "server"))
   ? path.resolve(moduleDirectory, "../public/viewer")
@@ -144,13 +166,20 @@ app.post<{ Params: { projectId: string } }>("/api/projects/:projectId/rerun", as
   return reply.code(202).send(projectResponse(next));
 });
 
-app.setErrorHandler((error, _request, reply) => {
+app.setErrorHandler((error, request, reply) => {
   const normalized = error instanceof Error ? error : new Error(String(error));
   const isStateConflict = /not waiting|still running|No checkpoint at sequence|Generation is blocked|reached the configured|requires feedback|requires a short explanation|interaction update is already|cannot be restarted automatically|No successful checkpoint|not currently working|still working/i.test(
     normalized.message,
   );
   const status = "issues" in normalized ? 400 : isStateConflict ? 409 : 500;
-  app.log.error(error);
+  request.log.error(
+    {
+      err: error,
+      request: { method: request.method, url: request.url, requestId: request.id },
+      statusCode: status,
+    },
+    "API request failed",
+  );
   void reply.code(status).send({ error: normalized.message });
 });
 
@@ -162,6 +191,20 @@ process.on("SIGINT", () => void close());
 process.on("SIGTERM", () => void close());
 
 await app.listen({ host: config.HOST, port: config.PORT });
+app.log.info(
+  {
+    listen: `${config.HOST}:${config.PORT}`,
+    publicUrl: config.PUBLIC_BASE_URL,
+    drivers: {
+      ai: "gemini",
+      renderer: "generated-r3f + playwright",
+      references: config.REFERENCE_SEARCH_DRIVER,
+      context: config.CONTEXT_DRIVER,
+    },
+    httpAccessLogs: config.LOG_HTTP_REQUESTS,
+  },
+  "SeeIn core ready",
+);
 
 function projectResponse(project: Awaited<ReturnType<typeof services.projects.create>>) {
   return {

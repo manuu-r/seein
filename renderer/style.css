@@ -117,6 +117,7 @@ canvas { display: block; }
 .launcher__kbd { display: flex; gap: 3px; color: var(--bone-400); font-size: 10px; }
 .launcher__kbd kbd { border: 1px solid var(--ink-300); border-radius: var(--r-thumb); padding: 2px 5px; font: inherit; }
 .launcher__error { margin: 0; color: var(--fail); font-size: 13px; }
+.launcher__scope { margin: -4px 0 0; color: var(--bone-400); font-size: 10.5px; line-height: 1.45; }
 
 .launcher__examples { display: flex; flex-wrap: wrap; gap: 6px; }
 .launcher__chip {
@@ -226,6 +227,32 @@ canvas { display: block; }
 .now__elapsed[hidden] { display: none; }
 .now__node { margin: 0; font-size: 19px; font-weight: 480; letter-spacing: -0.02em; line-height: 1.2; }
 .now__guidance { margin: 0; color: var(--bone-300); font-size: 13.5px; line-height: 1.55; overflow-wrap: anywhere; }
+.now__operation {
+  display: grid;
+  gap: 4px;
+  margin-top: 5px;
+  border: 1px solid var(--rule-strong);
+  border-left: 2px solid var(--bone-300);
+  border-radius: var(--r);
+  padding: 10px 11px;
+  background: var(--ink-100);
+}
+.now__operation[hidden] { display: none; }
+.now__operation[data-phase="completed"] { border-left-color: var(--pass); }
+.now__operation[data-phase="retrying"] { border-left-color: var(--warn); }
+.now__operation[data-phase="failed"] { border-left-color: var(--fail); }
+.now__operation-label { margin: 0; color: var(--bone-100); font-size: 12.5px; font-weight: 550; line-height: 1.4; }
+.now__operation-route,
+.now__operation-detail {
+  margin: 0;
+  color: var(--bone-400);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.now__operation[data-phase="retrying"] .now__operation-detail { color: var(--warn); }
+.now__operation[data-phase="failed"] .now__operation-detail { color: var(--fail); }
 
 /* A run in flight breathes, so working never looks like hung. */
 .now[data-working="true"] .now__node::after {
@@ -407,9 +434,11 @@ button.act:active:not(:disabled) { transform: translateY(1px); }
 }
 .step[data-status="completed"]::before { border-color: var(--pass); background: var(--pass); }
 .step[data-status="failed"]::before { border-color: var(--fail); background: var(--fail); }
+.step[data-status="retrying"]::before { border-color: var(--warn); background: var(--warn); }
 .step[data-status="started"]::before { border-color: var(--bone-100); animation: breathe 1.8s var(--ease) infinite; }
 .step__what { color: var(--bone-200); font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere; }
 .step[data-status="failed"] .step__what { color: var(--fail); }
+.step[data-status="retrying"] .step__what { color: var(--warn); }
 .step__meta { margin-top: 2px; color: var(--bone-400); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 
 /* ── Scene ───────────────────────────────────────────────────────────────── */

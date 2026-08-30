@@ -2,7 +2,7 @@ import { createAppServices } from "./app.js";
 import { loadConfig } from "./config.js";
 import { ClickHouseContextStore } from "./context/clickhouse-store.js";
 
-const [command = "demo", ...args] = process.argv.slice(2);
+const [command = "run", ...args] = process.argv.slice(2);
 
 if (command === "migrate") {
   const config = loadConfig();
@@ -10,32 +10,9 @@ if (command === "migrate") {
   await context.migrate();
   await context.close();
   process.stdout.write("ClickHouse schema is ready.\n");
-} else if (command === "demo") {
-  const prompt = args.join(" ") || "Right hepatic hilum anatomy for laparoscopic cholecystectomy with Calot’s triangle and structures at risk";
-  const config = loadConfig({
-    ...process.env,
-    AI_DRIVER: "deterministic",
-    REFERENCE_SEARCH_DRIVER: "none",
-    CONTEXT_DRIVER: "memory",
-    BLENDER_DRIVER: "deterministic",
-    SCREENSHOT_DRIVER: "placeholder",
-  });
-  const services = await createAppServices(config);
-  try {
-    const result = await services.orchestrator.run(prompt);
-    process.stdout.write(`${JSON.stringify({
-      projectId: result.project.projectId,
-      projectRoot: result.project.root,
-      finalRevision: result.finalScene.revision,
-      objects: result.finalScene.objects.length,
-      viewerUrl: result.viewerUrl,
-    }, null, 2)}\n`);
-  } finally {
-    await services.orchestrator.close();
-  }
 } else if (command === "run") {
   const prompt = args.join(" ");
-  if (!prompt) throw new Error("Usage: npm run demo -- <prompt> or tsx src/cli.ts run <prompt>");
+  if (!prompt) throw new Error("Usage: npm run generate -- <prompt> or tsx src/cli.ts run <prompt>");
   const services = await createAppServices(loadConfig());
   try {
     const result = await services.orchestrator.run(prompt);
@@ -46,8 +23,7 @@ if (command === "migrate") {
 } else if (command === "checkpoints") {
   const [projectId] = args;
   if (!projectId) throw new Error("Usage: node dist/server/cli.js checkpoints <projectId>");
-  // Listing checkpoints never calls a model, so it must not require a live AI key.
-  const services = await createAppServices(loadConfig({ ...process.env, AI_DRIVER: "deterministic", REFERENCE_SEARCH_DRIVER: "none" }));
+  const services = await createAppServices(loadConfig());
   try {
     const checkpoints = await services.orchestrator.listCheckpoints(projectId);
     process.stdout.write(`${JSON.stringify(checkpoints, null, 2)}\n`);

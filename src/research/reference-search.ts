@@ -72,7 +72,7 @@ export class FirecrawlReferenceSearch implements ReferenceSearchDriver {
   }
 }
 
-/** Used when reference search is switched off, and by the deterministic offline path. */
+/** Used when optional reference-image search is switched off. */
 export class DisabledReferenceSearch implements ReferenceSearchDriver {
   readonly identity = "reference-search-disabled:v1";
 

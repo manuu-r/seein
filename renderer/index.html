@@ -30,6 +30,7 @@
               <span class="launcher__kbd" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Enter</kbd></span>
             </div>
             <p id="launcher-error" class="launcher__error" hidden></p>
+            <p class="launcher__scope">Educational, non-patient-specific visualization. Not for diagnosis or clinical planning.</p>
           </form>
           <div id="launcher-examples" class="launcher__examples"></div>
           <aside id="launcher-recent" class="launcher__recent" hidden></aside>
@@ -61,14 +62,19 @@
             </p>
             <h2 id="workflow-node" class="now__node">Preparing</h2>
             <p id="workflow-guidance" class="now__guidance"></p>
+            <div id="workflow-operation" class="now__operation" hidden>
+              <p id="workflow-operation-label" class="now__operation-label"></p>
+              <p id="workflow-operation-route" class="now__operation-route"></p>
+              <p id="workflow-operation-detail" class="now__operation-detail"></p>
+            </div>
           </section>
 
           <!-- The answer to "what does it need from me". Dominant when present. -->
           <div id="workflow-action" class="console__action"></div>
 
           <!-- Everything already done, folded away until asked for. -->
-          <details id="activity" class="fold" hidden>
-            <summary>Steps</summary>
+          <details id="activity" class="fold" open hidden>
+            <summary>Activity &amp; diagnostics</summary>
             <ol id="workflow-steps" class="ledger"></ol>
             <ol id="activity-list" class="activity"></ol>
           </details>

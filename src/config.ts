@@ -11,13 +11,22 @@ const AutoResumeString = z
   .default("true")
   .transform((value) => value === "true");
 
+const DisabledBooleanString = z
+  .enum(["true", "false"])
+  .default("false")
+  .transform((value) => value === "true");
+
 const ConfigSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   HOST: z.string().default("0.0.0.0"),
   PORT: z.coerce.number().int().positive().default(8787),
   PUBLIC_BASE_URL: z.url().default("http://localhost:8787"),
   DATA_ROOT: z.string().default("./data"),
-  AI_DRIVER: z.enum(["gemini", "deterministic"]).default("gemini"),
+  LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
+  LOG_FORMAT: z.enum(["pretty", "json"]).default("pretty"),
+  // Polling endpoints swamp Docker logs and hide the expensive operations. They
+  // remain opt-in for low-level HTTP troubleshooting.
+  LOG_HTTP_REQUESTS: DisabledBooleanString,
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_RESEARCH_MODEL: z.string().default("gemini-3.7-flash"),
   GEMINI_REFERENCE_MODEL: z.string().default("gemini-3.1-flash-image"),
@@ -28,13 +37,6 @@ const ConfigSchema = z.object({
   CLICKHOUSE_DATABASE: z.string().default("seein"),
   CLICKHOUSE_USERNAME: z.string().default("default"),
   CLICKHOUSE_PASSWORD: z.string().default(""),
-  BLENDER_DRIVER: z.enum(["qwen-mcp", "deterministic"]).default("qwen-mcp"),
-  QWEN_MCP_COMMAND: z.string().default("qwen-mm-plugins-blender"),
-  QWEN_MCP_ARGS: z.string().default(""),
-  QWEN_MM_AUTOLAUNCH: z.string().default("1"),
-  BLENDER_HOST: z.string().default("127.0.0.1"),
-  BLENDER_PORT: z.coerce.number().int().positive().default(9876),
-  SCREENSHOT_DRIVER: z.enum(["playwright", "placeholder"]).default("playwright"),
   PLAYWRIGHT_HEADLESS: BooleanString,
   PLAYWRIGHT_EXECUTABLE_PATH: z.string().default(""),
   // firecrawl | gemini | none. Gemini's image-search grounding returns no chunks
@@ -49,7 +51,6 @@ const ConfigSchema = z.object({
   REFERENCE_IMAGE_MIN_EDGE: z.coerce.number().int().min(0).max(4096).default(400),
   REFERENCE_MAX_COUNT: z.coerce.number().int().min(0).max(64).default(48),
   REFERENCE_MAX_BYTES: z.coerce.number().int().min(1024).default(8_000_000),
-  WORKFLOW_MAX_OBJECTS: z.coerce.number().int().min(1).max(12).default(8),
   // Long-running autonomous quality supervision is constrained by both wall time
   // and action/API budgets. Passing state/view targets do not consume actions.
   WORKFLOW_MAX_ITERATIONS: z.coerce.number().int().min(1).max(128).default(64),
@@ -57,7 +58,6 @@ const ConfigSchema = z.object({
   // explicit run-policy choice (for example 240 minutes), not the default.
   WORKFLOW_MAX_RUNTIME_MINUTES: z.coerce.number().int().min(1).max(360).default(30),
   WORKFLOW_MAX_LOGICAL_AI_CALLS: z.coerce.number().int().min(4).max(1000).default(240),
-  WORKFLOW_MAX_TARGETED_RESEARCH_ROUNDS: z.coerce.number().int().min(0).max(24).default(8),
   WORKFLOW_STALL_WINDOW: z.coerce.number().int().min(2).max(12).default(3),
   WORKFLOW_MIN_QUALITY_DELTA: z.coerce.number().min(0).max(0.25).default(0.015),
   WORKFLOW_MIN_RECOGNIZABILITY: z.coerce.number().min(0).max(1).default(0.82),

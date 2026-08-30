@@ -9,5 +9,7 @@ describe("Gemini model defaults", () => {
     expect(config.GEMINI_REFERENCE_MODEL).toBe("gemini-3.1-flash-image");
     expect(config.GEMINI_PLANNER_MODEL).toBe("gemini-3.7-flash");
     expect(config.GEMINI_INSPECTOR_MODEL).toBe("gemini-3.7-flash");
+    expect(config.LOG_FORMAT).toBe("pretty");
+    expect(config.LOG_HTTP_REQUESTS).toBe(false);
   });
 });

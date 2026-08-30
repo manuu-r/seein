@@ -1,0 +1,478 @@
+{
+  "schemaVersion": "1.0",
+  "humanBase": {
+    "id": "makehuman-adult-supine",
+    "heightCm": 175,
+    "heightWorldUnits": 13.4,
+    "worldUnitsPerCm": 0.07657142857142857,
+    "axes": {
+      "x": "+X is patient-left",
+      "y": "+Y is cephalad",
+      "z": "+Z is anterior"
+    },
+    "source": "reference-projects/surgical-atlas/public/models/makehuman-base.obj"
+  },
+  "referenceScenes": [
+    {
+      "id": "surgical-atlas-patient-abdomen",
+      "source": "reference-projects/surgical-atlas/src/SurgicalScene.tsx",
+      "purpose": "Supine adult, operating room, patient shell, abdominal wall, thorax, abdominal and pelvic context, bowel, mesentery, ileocecal continuity, and staged procedural cameras.",
+      "registrationNotes": [
+        "Patient shell height is 13.4 world units for a 175 cm adult.",
+        "Patient anatomy is rotated [-0.13, 0.035, 0] and the supported shell uses z=-0.73.",
+        "The reference abdomen is anisotropically fitted to the shell; reusable frames below expose centimetres so generated modules do not repeat those nested transforms."
+      ]
+    },
+    {
+      "id": "surgical-atlas-right-groin",
+      "source": "reference-projects/surgical-atlas/src/IeaInjuryScene.tsx",
+      "purpose": "Right preperitoneal groin, inferior epigastric and external iliac vessels, deep ring, Cooper ligament, iliopubic tract, cord structures, hernia spaces, ports, and injury-control views.",
+      "registrationNotes": [
+        "All operative anatomy was authored in centimetres and converted once with 13.4/175.",
+        "The right-groin local origin is [0, 0.36, -0.95] inside the rotated patient frame.",
+        "Field depth is derived from named vascular, ligament, ring, cord, and pelvic anchors rather than an arbitrary flat sheet."
+      ]
+    },
+    {
+      "id": "seein-hepatobiliary-atlas",
+      "source": "renderer/atlas/HepatobiliaryAtlas.tsx",
+      "purpose": "High-detail right hepatic hilum registered to the Surgical Atlas patient, including a HuBMAP liver surface and continuous gallbladder, biliary, arterial, portal, and operative-plane anatomy.",
+      "registrationNotes": [
+        "The regional origin is the calibrated right subhepatic/hilar origin from the Surgical Atlas patient.",
+        "Normal structure centres and extents are fixed; phase, exposure, pathology, anatomical variation, instruments, overlays, and cameras remain request-specific.",
+        "The HuBMAP liver asset is used as reusable anatomical geometry with its source licence retained beside the viewer asset."
+      ]
+    }
+  ],
+  "frames": [
+    {
+      "id": "whole-body",
+      "label": "Whole supine adult",
+      "parentId": null,
+      "originPatient": [0, 0, 0],
+      "rotation": [0, 0, 0],
+      "scaleWorldPerCm": 0.07657142857142857,
+      "boundsCm": [52, 175, 34],
+      "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "usage": "External orientation, patient positioning, surface marking, ports, and room context."
+    },
+    {
+      "id": "central-abdomen",
+      "label": "Central abdominal cavity",
+      "parentId": "whole-body",
+      "originPatient": [0, 1.5206, -1.26],
+      "rotation": [-0.13, 0.035, 0],
+      "scaleWorldPerCm": 0.07657142857142857,
+      "boundsCm": [38, 48, 22],
+      "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "usage": "Prompt-specific intraperitoneal organs, bowel, mesentery, retroperitoneum, and abdominal wall relationships."
+    },
+    {
+      "id": "right-upper-quadrant",
+      "label": "Right subhepatic and hilar region",
+      "parentId": "whole-body",
+      "originPatient": [-0.35, 1.6, -0.93],
+      "rotation": [-0.13, 0.035, 0],
+      "scaleWorldPerCm": 0.07657142857142857,
+      "boundsCm": [28, 28, 36],
+      "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "usage": "Liver, gallbladder, porta hepatis, hepatoduodenal ligament, right subphrenic/subhepatic spaces, and laparoscopic cholecystectomy."
+    },
+    {
+      "id": "lower-gastrointestinal",
+      "label": "Lower abdominal bowel and ileocecal region",
+      "parentId": "whole-body",
+      "originPatient": [0, 1.045, -0.975],
+      "rotation": [-0.13, 0.035, 0],
+      "scaleWorldPerCm": 0.07657142857142857,
+      "boundsCm": [38, 34, 18],
+      "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "usage": "Colon, ileum, appendix, mesentery, abdominal-wall trephines, and stoma-related procedures."
+    },
+    {
+      "id": "pelvis",
+      "label": "Pelvis and pelvic brim",
+      "parentId": "whole-body",
+      "originPatient": [0, 0, -1.15],
+      "rotation": [-0.13, 0.035, 0],
+      "scaleWorldPerCm": 0.07657142857142857,
+      "boundsCm": [34, 32, 20],
+      "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "usage": "Pelvic viscera, iliac vessels, pelvic brim, and lower abdominal approaches."
+    },
+    {
+      "id": "right-groin",
+      "label": "Right preperitoneal groin",
+      "parentId": "whole-body",
+      "originPatient": [0, 0.36, -0.95],
+      "rotation": [-0.13, 0.035, 0],
+      "scaleWorldPerCm": 0.07657142857142857,
+      "boundsCm": [28, 28, 12],
+      "sourceSceneId": "surgical-atlas-right-groin",
+      "usage": "TAPP/TEP/eTEP groin anatomy, hernia spaces, inferior epigastric injury, and mesh fixation danger zones."
+    },
+    {
+      "id": "thorax",
+      "label": "Thoracic cavity",
+      "parentId": "whole-body",
+      "originPatient": [0, 3.075, -1.275],
+      "rotation": [-0.13, 0.035, 0],
+      "scaleWorldPerCm": 0.07657142857142857,
+      "boundsCm": [38, 42, 26],
+      "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "usage": "Heart, lungs, diaphragm, mediastinum, and thoracic approaches."
+    }
+  ],
+  "structures": [
+    {
+      "id": "liver", "label": "Liver", "frameId": "right-upper-quadrant",
+      "centerCm": [-1.05, 4.4, -7.1], "sizeCm": [19.2, 17.5, 19.4], "orientation": [0, 0, 0],
+      "landmarks": ["porta-hepatis", "gallbladder-fossa", "segment-ivb", "segment-v", "rouviere-sulcus"],
+      "sourceSceneId": "seein-hepatobiliary-atlas", "sourceSymbol": "HepatobiliaryAtlas.Liver",
+      "registrationMethod": "HuBMAP liver mesh bounds fitted to the transformed SurgicalScene liver and right subhepatic origin."
+    },
+    {
+      "id": "gallbladder", "label": "Gallbladder", "frameId": "right-upper-quadrant",
+      "centerCm": [-2.8, 3.35, 3.25], "sizeCm": [3.2, 7.4, 2.5], "orientation": [0.1, -0.12, -0.34],
+      "landmarks": ["gallbladder-fundus", "gallbladder-body", "hartmann-pouch", "gallbladder-neck"],
+      "sourceSceneId": "seein-hepatobiliary-atlas", "sourceSymbol": "HepatobiliaryAtlas.Gallbladder",
+      "registrationMethod": "Continuous gallbladder surface calibrated to the transformed SurgicalScene gallbladder fossa."
+    },
+    {
+      "id": "gallbladder-neck", "label": "Gallbladder neck", "frameId": "right-upper-quadrant",
+      "centerCm": [-1.52, 0.42, 2.2], "sizeCm": [0.8, 1.2, 0.8], "orientation": [0, 0, 0],
+      "landmarks": ["cystic-duct-origin"], "sourceSceneId": "seein-hepatobiliary-atlas",
+      "sourceSymbol": "HepatobiliaryAtlas.Gallbladder neck point", "registrationMethod": "Fixed local endpoint shared by gallbladder and cystic duct."
+    },
+    {
+      "id": "cystic-duct", "label": "Cystic duct", "frameId": "right-upper-quadrant",
+      "centerCm": [-0.8, 0.02, 1.85], "sizeCm": [1.6, 1.7, 1.2], "orientation": [0, 0, 0],
+      "landmarks": ["gallbladder-neck", "cystic-duct-junction"], "sourceSceneId": "seein-hepatobiliary-atlas",
+      "sourceSymbol": "HepatobiliaryAtlas.cysticDuct", "registrationMethod": "Envelope of the registered normal duct variants; endpoints remain invariant."
+    },
+    {
+      "id": "cystic-duct-junction", "label": "Cystic duct to common hepatic duct junction", "frameId": "right-upper-quadrant",
+      "centerCm": [-0.08, -0.38, 1.57], "sizeCm": [0.7, 0.7, 0.7], "orientation": [0, 0, 0],
+      "landmarks": ["cystic-duct", "common-hepatic-duct", "common-bile-duct"], "sourceSceneId": "seein-hepatobiliary-atlas",
+      "sourceSymbol": "HepatobiliaryAtlas.cysticJunction", "registrationMethod": "Exact shared branch coordinate in the continuous extrahepatic biliary tree."
+    },
+    {
+      "id": "common-hepatic-duct", "label": "Common hepatic duct", "frameId": "right-upper-quadrant",
+      "centerCm": [0.06, 1.94, 1.3], "sizeCm": [0.7, 4.9, 0.9], "orientation": [0, 0, 0],
+      "landmarks": ["cystic-duct-junction", "right-hepatic-duct", "left-hepatic-duct"], "sourceSceneId": "seein-hepatobiliary-atlas",
+      "sourceSymbol": "HepatobiliaryAtlas.commonHepaticDuct", "registrationMethod": "Tube-path bounds in the registered centimetre frame."
+    },
+    {
+      "id": "common-bile-duct", "label": "Common bile duct", "frameId": "right-upper-quadrant",
+      "centerCm": [0.25, -2.7, 1.05], "sizeCm": [0.7, 5.2, 0.7], "orientation": [0, 0, 0],
+      "landmarks": ["cystic-duct-junction", "duodenal-entry"], "sourceSceneId": "seein-hepatobiliary-atlas",
+      "sourceSymbol": "HepatobiliaryAtlas.commonBileDuct", "registrationMethod": "Tube-path bounds in the registered centimetre frame."
+    },
+    {
+      "id": "porta-hepatis", "label": "Porta hepatis", "frameId": "right-upper-quadrant",
+      "centerCm": [0.25, 2.1, -0.2], "sizeCm": [6.2, 3.9, 3.6], "orientation": [0, 0, 0],
+      "landmarks": ["portal-vein", "right-hepatic-artery", "common-hepatic-duct"], "sourceSceneId": "seein-hepatobiliary-atlas",
+      "sourceSymbol": "HepatobiliaryAtlas porta-hepatis mesh and triad branches", "registrationMethod": "HuBMAP porta-hepatis surface aligned with the continuous portal triad."
+    },
+    {
+      "id": "hepatocystic-triangle", "label": "Hepatocystic triangle", "frameId": "right-upper-quadrant",
+      "centerCm": [-0.8, 0.95, 1.7], "sizeCm": [2.7, 2.5, 1.4], "orientation": [0, 0, 0],
+      "landmarks": ["gallbladder-neck", "cystic-duct-junction", "cystic-artery"], "sourceSceneId": "seein-hepatobiliary-atlas",
+      "sourceSymbol": "HepatobiliaryAtlas.hepatocystic-triangle-fibrofatty-tissue", "registrationMethod": "Boundary derived from its three registered anatomical borders."
+    },
+    {
+      "id": "cystic-artery", "label": "Cystic artery", "frameId": "right-upper-quadrant",
+      "centerCm": [-0.6, 1.36, 1.05], "sizeCm": [2.5, 1.0, 2.0], "orientation": [0, 0, 0],
+      "landmarks": ["right-hepatic-artery", "gallbladder-neck", "hepatocystic-triangle"], "sourceSceneId": "seein-hepatobiliary-atlas",
+      "sourceSymbol": "HepatobiliaryAtlas.cysticArtery", "registrationMethod": "Envelope of standard and Moynihan-hump variants with fixed parent and gallbladder endpoints."
+    },
+    {
+      "id": "right-hepatic-artery", "label": "Right hepatic artery", "frameId": "right-upper-quadrant",
+      "centerCm": [-0.4, 2, 0.05], "sizeCm": [5.8, 5.8, 1], "orientation": [0, 0, 0],
+      "landmarks": ["proper-hepatic-artery", "cystic-artery-origin"], "sourceSceneId": "seein-hepatobiliary-atlas",
+      "sourceSymbol": "HepatobiliaryAtlas.hilar-arteries", "registrationMethod": "Continuous registered hilar arterial path bounds."
+    },
+    {
+      "id": "portal-vein", "label": "Main portal vein", "frameId": "right-upper-quadrant",
+      "centerCm": [0.5, 0.3, -1.6], "sizeCm": [1.2, 8.8, 1.2], "orientation": [0, 0, 0],
+      "landmarks": ["porta-hepatis", "right-portal-branch", "left-portal-branch"], "sourceSceneId": "seein-hepatobiliary-atlas",
+      "sourceSymbol": "HepatobiliaryAtlas.deep-portal-vein", "registrationMethod": "Continuous portal trunk and branch-path bounds."
+    },
+    {
+      "id": "rouviere-sulcus", "label": "Rouviere sulcus", "frameId": "right-upper-quadrant",
+      "centerCm": [-2.6, 1.55, 1.15], "sizeCm": [6.6, 1.7, 1.2], "orientation": [0, 0, 0],
+      "landmarks": ["segment-v", "right-portal-pedicle", "r4u-safety-plane"], "sourceSceneId": "seein-hepatobiliary-atlas",
+      "sourceSymbol": "HepatobiliaryAtlas.rouviere-r4u-safety-plane", "registrationMethod": "Registered safety-line path on the inferior liver surface."
+    },
+
+    {
+      "id": "stomach", "label": "Stomach", "frameId": "central-abdomen",
+      "centerCm": [4.84, 3.91, -0.06], "sizeCm": [5.96, 11, 3.49], "orientation": [0.05, 0.16, -0.18],
+      "landmarks": ["gastroesophageal-junction", "pylorus"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SurroundingOrgans stomach group", "registrationMethod": "Raw mesh bounds transformed through patient support, procedure fit, and abdominal organ fit; rounded to 0.01 cm."
+    },
+    {
+      "id": "duodenum", "label": "Duodenum", "frameId": "central-abdomen",
+      "centerCm": [4.13, 0.86, 0.2], "sizeCm": [4.6, 6.91, 1.8], "orientation": [0, 0, 0],
+      "landmarks": ["pylorus", "duodenojejunal-flexure", "pancreatic-head"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SurroundingOrgans.duodenum", "registrationMethod": "Tube-path bounds transformed through the complete abdominal fitting chain."
+    },
+    {
+      "id": "pancreas", "label": "Pancreas", "frameId": "central-abdomen",
+      "centerCm": [1.91, 1.64, -0.67], "sizeCm": [9.72, 1.91, 1.41], "orientation": [0, 0, 0],
+      "landmarks": ["pancreatic-head", "uncinate-process", "pancreatic-tail", "splenic-hilum"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SurroundingOrgans.pancreas", "registrationMethod": "Tube-path bounds transformed through the complete abdominal fitting chain."
+    },
+    {
+      "id": "spleen", "label": "Spleen", "frameId": "central-abdomen",
+      "centerCm": [10.66, 4.86, -1.1], "sizeCm": [3.59, 8.45, 2.12], "orientation": [0, 0, -0.25],
+      "landmarks": ["splenic-hilum", "pancreatic-tail", "left-kidney"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SurroundingOrgans spleen mesh", "registrationMethod": "Mesh bounds transformed through the complete abdominal fitting chain."
+    },
+    {
+      "id": "right-kidney", "label": "Right kidney", "frameId": "central-abdomen",
+      "centerCm": [-7.79, -5.23, -1.35], "sizeCm": [4.06, 8.36, 2.47], "orientation": [0.08, 0.2, 0.1],
+      "landmarks": ["right-adrenal", "right-ureter", "inferior-vena-cava"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SurroundingOrgans kidney group x=-2.3", "registrationMethod": "Mesh bounds transformed through the complete abdominal fitting chain."
+    },
+    {
+      "id": "left-kidney", "label": "Left kidney", "frameId": "central-abdomen",
+      "centerCm": [7.79, -5.23, -1.35], "sizeCm": [4.06, 8.36, 2.47], "orientation": [0.08, -0.2, -0.1],
+      "landmarks": ["left-adrenal", "left-ureter", "spleen"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SurroundingOrgans kidney group x=2.3", "registrationMethod": "Mesh bounds transformed through the complete abdominal fitting chain."
+    },
+    {
+      "id": "right-adrenal", "label": "Right adrenal gland", "frameId": "central-abdomen",
+      "centerCm": [-7.79, -1.36, -1.41], "sizeCm": [2.44, 1.82, 1.57], "orientation": [0, 0, 0],
+      "landmarks": ["right-kidney", "inferior-vena-cava"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SurroundingOrgans right adrenal mesh", "registrationMethod": "Mesh bounds transformed through the complete abdominal fitting chain."
+    },
+    {
+      "id": "left-adrenal", "label": "Left adrenal gland", "frameId": "central-abdomen",
+      "centerCm": [7.79, -1.36, -1.41], "sizeCm": [2.44, 1.82, 1.57], "orientation": [0, 0, 0],
+      "landmarks": ["left-kidney", "abdominal-aorta"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SurroundingOrgans left adrenal mesh", "registrationMethod": "Mesh bounds transformed through the complete abdominal fitting chain."
+    },
+    {
+      "id": "abdominal-aorta", "label": "Abdominal aorta", "frameId": "central-abdomen",
+      "centerCm": [-1.57, -4.14, -1.65], "sizeCm": [2.54, 28.63, 1.18], "orientation": [0, 0, 0],
+      "landmarks": ["diaphragmatic-hiatus", "aortic-bifurcation"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SurroundingOrgans.aorta", "registrationMethod": "Tube-path bounds transformed through the complete abdominal fitting chain."
+    },
+    {
+      "id": "inferior-vena-cava", "label": "Inferior vena cava", "frameId": "central-abdomen",
+      "centerCm": [1.86, -4.14, -1.72], "sizeCm": [2.5, 28.72, 1.25], "orientation": [0, 0, 0],
+      "landmarks": ["right-renal-hilum", "iliocaval-confluence"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SurroundingOrgans.cava", "registrationMethod": "Tube-path bounds transformed through the complete abdominal fitting chain."
+    },
+
+    {
+      "id": "colon", "label": "Colon", "frameId": "lower-gastrointestinal",
+      "centerCm": [-0.22, -0.95, -1.31], "sizeCm": [25.63, 27.81, 3.41], "orientation": [0, 0, 0],
+      "landmarks": ["cecum", "hepatic-flexure", "splenic-flexure", "sigmoid-colon"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "COLON_POINTS and ColonFrame", "registrationMethod": "Tube and haustral bounds transformed through the complete GI fitting chain."
+    },
+    {
+      "id": "cecum", "label": "Cecum", "frameId": "lower-gastrointestinal",
+      "centerCm": [-11.07, -8.09, -0.63], "sizeCm": [5.01, 7.54, 4.39], "orientation": [0, 0, 0],
+      "landmarks": ["ileocecal-junction", "appendiceal-base", "ascending-colon"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "CecumAndAppendix cecum mesh", "registrationMethod": "Mesh bounds transformed through the complete GI fitting chain."
+    },
+    {
+      "id": "appendix", "label": "Vermiform appendix", "frameId": "lower-gastrointestinal",
+      "centerCm": [-12.25, -10.93, -0.18], "sizeCm": [2.64, 5.14, 1.37], "orientation": [0, 0, 0],
+      "landmarks": ["appendiceal-base", "cecum", "terminal-ileum"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "CecumAndAppendix.appendix", "registrationMethod": "Tube-path bounds transformed through the complete GI fitting chain."
+    },
+    {
+      "id": "ileocecal-junction", "label": "Ileocecal junction", "frameId": "lower-gastrointestinal",
+      "centerCm": [-9.55, -7.5, 0.27], "sizeCm": [2.84, 1.36, 0.78], "orientation": [0, 0, -0.35],
+      "landmarks": ["terminal-ileum", "cecum", "appendiceal-base"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "ILEOCECAL_JUNCTION_RAW", "registrationMethod": "Exact landmark transformed through the complete GI fitting chain."
+    },
+    {
+      "id": "small-bowel-bed", "label": "Jejunoileal small-bowel bed", "frameId": "lower-gastrointestinal",
+      "centerCm": [-0.07, -0.09, 1.53], "sizeCm": [17.26, 17.54, 3.53], "orientation": [0, 0, 0],
+      "landmarks": ["duodenojejunal-flexure", "terminal-ileum", "mesenteric-root"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SMALL_BOWEL_PATH and SmallBowelBed", "registrationMethod": "Continuous tube-path bounds transformed through the complete GI fitting chain."
+    },
+    {
+      "id": "mesenteric-bed", "label": "Small-bowel mesentery", "frameId": "lower-gastrointestinal",
+      "centerCm": [-0.51, 0.82, -0.22], "sizeCm": [16.72, 17.27, 3.96], "orientation": [0, 0, 0],
+      "landmarks": ["mesenteric-root", "ileal-vascular-arcades", "terminal-ileum"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "MESENTERIC_LEAVES and MesentericBed", "registrationMethod": "Union of fan and arcade bounds transformed through the complete GI fitting chain."
+    },
+    {
+      "id": "greater-omentum", "label": "Greater omentum", "frameId": "lower-gastrointestinal",
+      "centerCm": [0, 7.09, 1.33], "sizeCm": [16.93, 10.18, 1.25], "orientation": [0, 0, 0],
+      "landmarks": ["greater-curvature", "transverse-colon"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "Omentum", "registrationMethod": "Apron geometry bounds transformed through the complete GI fitting chain."
+    },
+    {
+      "id": "urinary-bladder", "label": "Urinary bladder", "frameId": "pelvis",
+      "centerCm": [0, -1.18, -1.67], "sizeCm": [4.87, 6.18, 2.35], "orientation": [0, 0, 0],
+      "landmarks": ["bladder-dome", "ureteric-orifices", "pubic-symphysis"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "SurroundingOrgans bladder mesh", "registrationMethod": "Mesh bounds transformed through the complete abdominal fitting chain and expressed in the pelvic frame."
+    },
+    {
+      "id": "rectum", "label": "Rectum", "frameId": "pelvis",
+      "centerCm": [2.37, 0.92, 0.11], "sizeCm": [4.6, 5.27, 4.66], "orientation": [0, 0, 0],
+      "landmarks": ["rectosigmoid-junction", "pelvic-peritoneal-reflection"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "PelvicContext.rectalContinuity", "registrationMethod": "Tube-path bounds transformed through the complete GI fitting chain and expressed in the pelvic frame."
+    },
+    {
+      "id": "pelvic-peritoneal-reflection", "label": "Pelvic peritoneal reflection", "frameId": "pelvis",
+      "centerCm": [0.68, 0.83, -0.57], "sizeCm": [15.23, 7.45, 1.96], "orientation": [0, 0, 0],
+      "landmarks": ["rectum", "urinary-bladder", "pelvic-brim"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "PelvicContext reflection mesh", "registrationMethod": "Mesh bounds transformed through the complete GI fitting chain and expressed in the pelvic frame."
+    },
+
+    {
+      "id": "right-lung", "label": "Right lung", "frameId": "thorax",
+      "centerCm": [-4.57, 1.82, -0.12], "sizeCm": [11.17, 16.18, 4.47], "orientation": [0.04, 0.08, 0.08],
+      "landmarks": ["right-hilum", "right-main-bronchus", "diaphragm"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "ThoracicOrgans lung group x=-1.35", "registrationMethod": "Mesh bounds transformed through patient support, procedure fit, and thoracic organ fit."
+    },
+    {
+      "id": "left-lung", "label": "Left lung", "frameId": "thorax",
+      "centerCm": [4.57, 1.82, -0.12], "sizeCm": [11.17, 16.18, 4.47], "orientation": [0.04, -0.08, -0.08],
+      "landmarks": ["left-hilum", "left-main-bronchus", "cardiac-notch", "diaphragm"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "ThoracicOrgans lung group x=1.35", "registrationMethod": "Mesh bounds transformed through patient support, procedure fit, and thoracic organ fit."
+    },
+    {
+      "id": "heart", "label": "Heart", "frameId": "thorax",
+      "centerCm": [-0.41, -2.02, 2.17], "sizeCm": [4.27, 7.41, 3.57], "orientation": [0.02, 0.12, -0.32],
+      "landmarks": ["cardiac-apex", "aortic-root", "pulmonary-trunk"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "ThoracicOrgans heart group", "registrationMethod": "Mesh bounds transformed through the complete thoracic fitting chain."
+    },
+    {
+      "id": "tracheobronchial-tree", "label": "Trachea and main bronchi", "frameId": "thorax",
+      "centerCm": [0, 4.34, -0.06], "sizeCm": [5.08, 5.5, 1.45], "orientation": [0, 0, 0],
+      "landmarks": ["carina", "right-main-bronchus", "left-main-bronchus"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "ThoracicOrgans trachea and bronchial tubes", "registrationMethod": "Union of tube-path bounds transformed through the complete thoracic fitting chain."
+    },
+    {
+      "id": "diaphragm", "label": "Diaphragm", "frameId": "thorax",
+      "centerCm": [0, -5.59, -0.51], "sizeCm": [18.62, 4.36, 2.19], "orientation": [0, 0, 0],
+      "landmarks": ["right-hemidiaphragm", "left-hemidiaphragm", "esophageal-hiatus"], "sourceSceneId": "surgical-atlas-patient-abdomen",
+      "sourceSymbol": "ThoracicOrgans diaphragm mesh", "registrationMethod": "Mesh bounds transformed through the complete thoracic fitting chain."
+    },
+
+    {
+      "id": "external-iliac-artery-right", "label": "Right external iliac artery", "frameId": "right-groin",
+      "centerCm": [-4.9, -0.65, -2.17], "sizeCm": [4.4, 9.1, 2.45], "orientation": [0, 0, 0],
+      "landmarks": ["inferior-epigastric-origin-right", "mid-inguinal-point"], "sourceSceneId": "surgical-atlas-right-groin",
+      "sourceSymbol": "EXTERNAL_ILIAC_ARTERY", "registrationMethod": "Exact centimetre path envelope on the anatomy-derived preperitoneal field."
+    },
+    {
+      "id": "external-iliac-vein-right", "label": "Right external iliac vein", "frameId": "right-groin",
+      "centerCm": [-4.1, -0.93, -2.22], "sizeCm": [4.4, 8.95, 2.27], "orientation": [0, 0, 0],
+      "landmarks": ["femoral-vein", "inferior-epigastric-venae-comitantes", "triangle-of-doom"], "sourceSceneId": "surgical-atlas-right-groin",
+      "sourceSymbol": "EXTERNAL_ILIAC_VEIN", "registrationMethod": "Exact centimetre path envelope on the anatomy-derived preperitoneal field."
+    },
+    {
+      "id": "inferior-epigastric-origin-right", "label": "Right inferior epigastric artery origin", "frameId": "right-groin",
+      "centerCm": [-5.45, 1.55, -3.4], "sizeCm": [0.5, 0.5, 0.5], "orientation": [0, 0, 0],
+      "landmarks": ["external-iliac-artery-right", "inferior-epigastric-artery-right"], "sourceSceneId": "surgical-atlas-right-groin",
+      "sourceSymbol": "IEA_ORIGIN", "registrationMethod": "Exact shared parent/daughter branch coordinate authored in centimetres."
+    },
+    {
+      "id": "inferior-epigastric-artery-right", "label": "Right inferior epigastric artery", "frameId": "right-groin",
+      "centerCm": [-4.5, 7.13, -0.15], "sizeCm": [1.91, 11.15, 6.5], "orientation": [0, 0, 0],
+      "landmarks": ["inferior-epigastric-origin-right", "posterior-rectus"], "sourceSceneId": "surgical-atlas-right-groin",
+      "sourceSymbol": "IEA", "registrationMethod": "Exact centimetre path envelope from origin to posterior rectus branches."
+    },
+    {
+      "id": "deep-inguinal-ring-right", "label": "Right deep inguinal ring", "frameId": "right-groin",
+      "centerCm": [-8.3, 1.45, -2.86], "sizeCm": [2.12, 2.92, 1.9], "orientation": [0.06, -0.04, -0.18],
+      "landmarks": ["vas-deferens-right", "gonadal-vessels-right", "iliopubic-tract-right"], "sourceSceneId": "surgical-atlas-right-groin",
+      "sourceSymbol": "DeepRing and RING_SLING", "registrationMethod": "Exact surface-registered opening centre plus funnel and sling extents."
+    },
+    {
+      "id": "cooper-ligament-right", "label": "Right Cooper ligament", "frameId": "right-groin",
+      "centerCm": [-3.2, -2.65, -1.09], "sizeCm": [6.6, 0.9, 0.86], "orientation": [0, 0, 0],
+      "landmarks": ["pubic-symphysis", "pecten-pubis"], "sourceSceneId": "surgical-atlas-right-groin",
+      "sourceSymbol": "COOPER_LIGAMENT", "registrationMethod": "Exact centimetre path envelope on the pecten."
+    },
+    {
+      "id": "iliopubic-tract-right", "label": "Right iliopubic tract", "frameId": "right-groin",
+      "centerCm": [-7.4, -0.28, -1.25], "sizeCm": [11.6, 4.15, 1.36], "orientation": [0, 0, 0],
+      "landmarks": ["pubic-tubercle", "deep-inguinal-ring-right", "asis-right"], "sourceSceneId": "surgical-atlas-right-groin",
+      "sourceSymbol": "ILIOPUBIC_TRACT", "registrationMethod": "Exact centimetre path envelope from pubic insertion to lateral field."
+    },
+    {
+      "id": "vas-deferens-right", "label": "Right vas deferens", "frameId": "right-groin",
+      "centerCm": [-4.77, -2.13, -1.41], "sizeCm": [7.15, 6.74, 1.14], "orientation": [0, 0, 0],
+      "landmarks": ["deep-inguinal-ring-right", "triangle-of-doom", "medial-cord"], "sourceSceneId": "surgical-atlas-right-groin",
+      "sourceSymbol": "VAS_DEFERENS", "registrationMethod": "Exact centimetre path envelope on the anatomy-derived preperitoneal field."
+    },
+    {
+      "id": "gonadal-vessels-right", "label": "Right gonadal vessels", "frameId": "right-groin",
+      "centerCm": [-11.05, 1.43, -1.44], "sizeCm": [5.4, 1.95, 0.85], "orientation": [0, 0, 0],
+      "landmarks": ["deep-inguinal-ring-right", "triangle-of-doom", "psoas"], "sourceSceneId": "surgical-atlas-right-groin",
+      "sourceSymbol": "GONADAL_ARTERY and GONADAL_VEIN", "registrationMethod": "Union of exact centimetre artery and vein path envelopes."
+    },
+    {
+      "id": "medial-umbilical-ligament-right", "label": "Right medial umbilical ligament", "frameId": "right-groin",
+      "centerCm": [-1.8, 3.3, -0.27], "sizeCm": [1, 15.4, 4.75], "orientation": [0, 0, 0],
+      "landmarks": ["medial-umbilical-fold", "direct-inguinal-space"], "sourceSceneId": "surgical-atlas-right-groin",
+      "sourceSymbol": "MEDIAL_UMBILICAL_LIGAMENT", "registrationMethod": "Exact centimetre path envelope on the anatomy-derived preperitoneal field."
+    },
+    {
+      "id": "corona-mortis-right", "label": "Right corona mortis corridor", "frameId": "right-groin",
+      "centerCm": [-4.82, -1.72, -1.75], "sizeCm": [0.95, 4.35, 1.82], "orientation": [0, 0, 0],
+      "landmarks": ["cooper-ligament-right", "external-iliac-vessels-right", "obturator-corridor"], "sourceSceneId": "surgical-atlas-right-groin",
+      "sourceSymbol": "CORONA_MORTIS", "registrationMethod": "Exact variant-vessel path envelope over Cooper ligament."
+    }
+  ],
+  "cameras": [
+    {
+      "id": "whole-patient-supine",
+      "frameId": "whole-body",
+      "position": [0.25, -7.55, 22.1],
+      "target": [0, 0.1, -0.72],
+      "fov": 41,
+      "purpose": "Whole patient and operating-room orientation"
+    },
+    {
+      "id": "abdominal-cutaway",
+      "frameId": "central-abdomen",
+      "position": [-0.15, -2.2, 6.4],
+      "target": [-0.25, 0.9, -0.85],
+      "fov": 38,
+      "purpose": "Abdominal cavity orientation"
+    },
+    {
+      "id": "right-subhepatic-laparoscope",
+      "frameId": "right-upper-quadrant",
+      "position": [-0.35, 0.05, 1.35],
+      "target": [-0.45, 1.58, -0.94],
+      "fov": 36,
+      "purpose": "Subhepatic operative exposure"
+    },
+    {
+      "id": "right-hilum-macro",
+      "frameId": "right-upper-quadrant",
+      "position": [-0.25, 0.58, 0.95],
+      "target": [-0.43, 1.54, -0.93],
+      "fov": 32,
+      "purpose": "Calot triangle, CVS, and portal-triad depth"
+    },
+    {
+      "id": "right-groin-patient",
+      "frameId": "right-groin",
+      "position": [0.25, -5.35, 22.1],
+      "target": [0, 0.1, -0.72],
+      "fov": 41,
+      "purpose": "Whole-patient groin approach and ports"
+    },
+    {
+      "id": "right-groin-laparoscope",
+      "frameId": "right-groin",
+      "position": [-0.38, 0.53, 1.18],
+      "target": [-0.47, 0.47, -0.88],
+      "fov": 45,
+      "purpose": "Preperitoneal groin operative field"
+    }
+  ]
+}
