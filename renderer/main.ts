@@ -788,13 +788,18 @@ function openResearchDossier(): void {
   dossierReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   dossierLayer.hidden = false;
   document.documentElement.classList.add("has-dossier");
+  dossierContent.scrollTop = 0;
   dossierClose.focus();
 }
 
 function closeResearchDossier(): void {
   dossierLayer.hidden = true;
   document.documentElement.classList.remove("has-dossier");
-  dossierReturnFocus?.focus();
+  if (dossierReturnFocus?.isConnected && dossierReturnFocus.getClientRects().length > 0) {
+    dossierReturnFocus.focus();
+  } else if (!dossierOpen.hidden) {
+    dossierOpen.focus();
+  }
   dossierReturnFocus = null;
 }
 
@@ -803,6 +808,20 @@ dossierClose.addEventListener("click", closeResearchDossier);
 dossierScrim.addEventListener("click", closeResearchDossier);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !dossierLayer.hidden) closeResearchDossier();
+  if (event.key !== "Tab" || dossierLayer.hidden) return;
+  const focusable = [...dossierLayer.querySelectorAll<HTMLElement>(
+    'a[href], button:not([disabled]), summary, input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  )].filter((element) => element.getClientRects().length > 0);
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (!first || !last) return;
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 });
 
 type ResearchDossier = NonNullable<WorkflowGraphState["researchDossier"]>;
@@ -1050,7 +1069,15 @@ function dossierSection(id: string, title: string, description: string): { secti
   const head = document.createElement("header");
   const eyebrow = document.createElement("p");
   eyebrow.className = "dossier-section__index";
-  eyebrow.textContent = String(document.querySelectorAll(".dossier-section").length + 1).padStart(2, "0");
+  const sectionNumbers: Record<string, string> = {
+    overview: "01",
+    anatomy: "02",
+    images: "03",
+    sources: "04",
+    readiness: "05",
+    trace: "06",
+  };
+  eyebrow.textContent = sectionNumbers[id] ?? "—";
   const heading = document.createElement("h3");
   heading.textContent = title;
   const lede = document.createElement("p");
@@ -1138,8 +1165,8 @@ function traceCard(titleText: string, values: string[], emptyText: string): HTML
 function perspectiveLabel(value: string): string {
   const labels: Record<string, string> = {
     "visual-identity": "Visual identity",
-    "structure-material": "Structure & tissue",
-    "context-variants": "Context & variation",
+    "objects-materials": "Anatomy & tissue",
+    "scale-space": "Scale & spatial relationships",
   };
   return labels[value] ?? humanize(value);
 }
