@@ -379,12 +379,13 @@ ${JSON.stringify(reusableAtlas.map((entry) => ({
 
 ${recovery ? `This is revision ${recovery.attempt + 1} after visual QA failed.
 Failed view: ${recovery.failedViewId}; failed step: ${recovery.failedStepId ?? "unspecified"}
+Views that passed on the previous source: ${JSON.stringify(recovery.passedTargetIds ?? [])}
 Issue: ${recovery.issue}
 Visible evidence: ${recovery.evidence}
 Failed criteria: ${JSON.stringify(recovery.failedCriteria)}
 Previous definition and source: ${JSON.stringify(recovery.previous)}
 
-Correct the actual construction and camera responsible for the visible failure. Preserve accurate code and step IDs, but rewrite any amount of the module needed for anatomical fidelity. Do not paper over missing geometry with a label, color, or explanation.` : ""}
+Correct the actual construction and camera responsible for the visible failure. Treat the previous source as the source of truth: preserve its accurate geometry, definition, step/view IDs, cameras, placements, and every previously passed view byte-for-byte wherever possible. Make the smallest coherent source change that fixes the cited pixels. Broader reconstruction is allowed only when the failed criteria explicitly identify a cross-scene anatomical construction defect. Do not paper over missing geometry with a label, color, or explanation.` : ""}
 
 The returned source is procedure-specific scene code. A trusted host supplies the Canvas, camera controls, lighting, operating room, UI, and active step. Export one default React component with this exact signature:
 

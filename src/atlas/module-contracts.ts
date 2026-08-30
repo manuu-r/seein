@@ -121,6 +121,7 @@ export interface SurgicalModuleRecoveryContext {
   attempt: number;
   failedViewId: string;
   failedStepId?: string | undefined;
+  passedTargetIds?: string[] | undefined;
   issue: string;
   evidence: string;
   failedCriteria: string[];

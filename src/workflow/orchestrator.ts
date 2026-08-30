@@ -9,6 +9,7 @@ import {
 } from "../atlas/anatomical-registry.js";
 import { SurgicalAtlasLibrary } from "../atlas/module-library.js";
 import {
+  CompiledSurgicalModuleSchema,
   SurgicalModuleSourceSchema,
   type CompiledSurgicalModule,
   type SurgicalModuleRecoveryContext,
@@ -1024,6 +1025,14 @@ export class Orchestrator {
         dossier: state.researchDossier,
         interactive: true,
         qualitySessionKey: `${project.projectId}:resume-${state.resumeCount}`,
+        ...(startingState.finalSceneRevision && startingState.qaCoverage && !startingState.qaCoverage.complete
+          ? {
+              resumeQuality: {
+                revision: startingState.finalSceneRevision,
+                coverage: startingState.qaCoverage,
+              },
+            }
+          : {}),
       });
       state = transitionGraphState(
         state,
@@ -1134,6 +1143,7 @@ export class Orchestrator {
       dossier?: ResearchDossier;
       interactive?: boolean;
       qualitySessionKey?: string;
+      resumeQuality?: { revision: number; coverage: QaCoverage };
     } = {},
   ): Promise<WorkflowResult> {
     let project = initialProject;
@@ -1264,10 +1274,42 @@ export class Orchestrator {
       };
 
       project = await this.stage(project, "planning");
-      let currentRevision = 1;
-      let built = await generateAndCompile(currentRevision);
-      let source = built.source;
-      let compiled = built.compiled;
+      let currentRevision = options.resumeQuality?.revision ?? 1;
+      let source: SurgicalModuleSource;
+      let compiled: CompiledSurgicalModule;
+      let built: { source: SurgicalModuleSource; compiled: CompiledSurgicalModule };
+      if (options.resumeQuality) {
+        const revisionName = `revision-${padRevision(currentRevision)}`;
+        const [definitionJson, sourceText, compiledJson] = await Promise.all([
+          fs.readFile(path.join(project.root, "module", "definition.json"), "utf8"),
+          fs.readFile(path.join(project.root, "module", revisionName, "scene.tsx"), "utf8"),
+          fs.readFile(path.join(project.root, "module", "compiled.json"), "utf8"),
+        ]);
+        source = SurgicalModuleSourceSchema.parse({
+          definition: JSON.parse(definitionJson),
+          source: sourceText,
+        });
+        const checkpointCompiled = CompiledSurgicalModuleSchema.parse(JSON.parse(compiledJson));
+        if (checkpointCompiled.revision !== currentRevision) {
+          throw new Error(
+            `Cannot resume visual QA: compiled revision ${checkpointCompiled.revision} does not match checkpoint revision ${currentRevision}.`,
+          );
+        }
+        if (checkpointCompiled.sourceSha256 !== sha256(Buffer.from(source.source))) {
+          throw new Error(`Cannot resume visual QA: revision ${currentRevision} source no longer matches its compiled artifact.`);
+        }
+        validateSurgicalModuleAgainstDossier(source, options.dossier);
+        validateModulePlacements(source.definition, reusableAtlas.flatMap((entry) => entry.placements));
+        validateProcedureAtlasContract(project.prompt, source);
+        // Re-bundle the unchanged generated source against the current trusted host.
+        // This lets renderer/readiness/QA fixes take effect after a service upgrade
+        // without asking Gemini to regenerate anatomy that already passed review.
+        compiled = await this.atlasCompiler.compile(relativeRoot, currentRevision, source);
+      } else {
+        built = await generateAndCompile(currentRevision);
+        source = built.source;
+        compiled = built.compiled;
+      }
       await Promise.all([
         this.artifacts.writeJson(`${relativeRoot}/module/definition.json`, source.definition),
         this.artifacts.writeJson(`${relativeRoot}/module/compiled.json`, compiled),
@@ -1278,6 +1320,7 @@ export class Orchestrator {
           steps: source.definition.steps.length,
           qaViews: source.definition.qaViews.length,
           importedAssets: 0,
+          resumedRevision: options.resumeQuality?.revision ?? null,
         }),
       ]);
 
@@ -1298,18 +1341,22 @@ export class Orchestrator {
       ]);
 
       let targets = buildQaTargets(currentScene, this.config.WORKFLOW_MAX_QA_TARGETS);
-      const passedTargetIds = new Set<string>();
-      let targetIndex = 0;
-      let currentTarget = targets[0]!;
+      const targetIds = new Set(targets.map((target) => target.id));
+      const passedTargetIds = new Set(
+        (options.resumeQuality?.coverage.passedTargetIds ?? []).filter((targetId) => targetIds.has(targetId)),
+      );
+      let targetIndex = targets.findIndex((target) => !passedTargetIds.has(target.id));
+      if (targetIndex < 0) targetIndex = 0;
+      let currentTarget = targets[targetIndex]!;
       let inspectionCount = 0;
-      let refinements = 0;
+      let refinements = options.resumeQuality?.coverage.refinements ?? 0;
       let finalInspection: Inspection | null = null;
       let finalVerdict: Inspection["verdict"] = "fix";
       supervisor = QualitySupervisorStateSchema.parse({
         ...supervisor,
         currentRevision,
         currentTargetId: currentTarget.id,
-        passedTargetIds: [],
+        passedTargetIds: [...passedTargetIds],
         updatedAt: new Date().toISOString(),
       });
       await this.persistQualitySupervisor(project, supervisor);
@@ -1419,8 +1466,8 @@ export class Orchestrator {
 
         if (qualityGate.passed) {
           passedTargetIds.add(currentTarget.id);
-          targetIndex += 1;
-          if (targetIndex >= targets.length) break;
+          targetIndex = targets.findIndex((target) => !passedTargetIds.has(target.id));
+          if (targetIndex < 0) break;
           currentTarget = targets[targetIndex]!;
           supervisor = QualitySupervisorStateSchema.parse({
             ...supervisor,
@@ -1448,6 +1495,7 @@ export class Orchestrator {
           attempt: refinements + 1,
           failedViewId: currentTarget.viewId ?? currentTarget.id,
           failedStepId: currentTarget.stateId,
+          passedTargetIds: [...passedTargetIds],
           issue: inspection.issue || "The generated surgical view did not pass the quality gate.",
           evidence: inspection.evidence,
           failedCriteria: inspection.assessment.failedCriteria,
@@ -1788,7 +1836,7 @@ export class Orchestrator {
       target: target ?? null,
       renderer: RENDERER_CACHE_IDENTITY,
       capture: this.screenshots.identity,
-      schema: "render-v1",
+      schema: "render-v2-label-free-qa",
     });
     const cached = CachedRenderSchema.safeParse(await this.findCachedStepFor(project.projectId, cacheKey));
     const cacheHit =
@@ -1861,6 +1909,7 @@ export class Orchestrator {
     const query = new URLSearchParams({ manifest: manifestUrl });
     if (target?.stateId) query.set("state", target.stateId);
     if (target?.viewId) query.set("view", target.viewId);
+    if (target) query.set("qa", "1");
     return `${this.config.PUBLIC_BASE_URL.replace(/\/$/, "")}/viewer/?${query.toString()}`;
   }
 

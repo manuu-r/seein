@@ -10,29 +10,66 @@
     <main id="app">
       <div id="viewport"></div>
 
-      <!-- Entry. One field, nothing competing with it. -->
+      <!-- Entry. The prompt remains the only primary action, with context around it. -->
       <section id="launcher" class="launcher" hidden>
+        <div class="launcher__ambient" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
         <div class="launcher__inner">
-          <header class="launcher__head">
+          <header class="launcher__nav">
             <p class="wordmark">SeeIn</p>
-            <h1 class="launcher__title">What anatomy do you<br />need to see?</h1>
+            <p class="launcher__trust"><span></span> Evidence-grounded anatomy</p>
           </header>
-          <form id="launcher-form" class="launcher__form">
-            <textarea
-              id="launcher-prompt"
-              rows="2"
-              required
-              aria-label="Anatomy or procedure"
-              placeholder="Right hepatic hilum for laparoscopic cholecystectomy, showing Calot&rsquo;s triangle"
-            ></textarea>
-            <div class="launcher__row">
-              <button type="submit" id="launcher-submit">Build</button>
-              <span class="launcher__kbd" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Enter</kbd></span>
+
+          <div class="launcher__hero">
+            <header class="launcher__head">
+              <p class="launcher__eyebrow">Surgical anatomy, made visible</p>
+              <h1 class="launcher__title">What do you need<br />to see inside?</h1>
+              <p class="launcher__lede">Describe an anatomy, approach, or procedure. SeeIn researches the evidence, resolves spatial relationships, and builds an explorable teaching model.</p>
+              <div class="launcher__proof" aria-label="Workflow summary">
+                <span>Research</span><i></i><span>Construct</span><i></i><span>Verify</span>
+              </div>
+            </header>
+
+            <form id="launcher-form" class="launcher__form">
+              <label class="launcher__label" for="launcher-prompt">Describe the view</label>
+              <textarea
+                id="launcher-prompt"
+                rows="4"
+                required
+                aria-label="Anatomy or procedure"
+                placeholder="Right hepatic hilum for laparoscopic cholecystectomy, showing Calot&rsquo;s triangle&hellip;"
+              ></textarea>
+              <div class="launcher__row">
+                <button
+                  type="button"
+                  id="voice-input"
+                  class="voice-trigger"
+                  aria-disabled="true"
+                  aria-describedby="voice-hint"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.25a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 1 0-7 0v5a3.5 3.5 0 0 0 3.5 3.5Zm-6-4a6 6 0 0 0 12 0M12 17.25v3M9.5 20.25h5" /></svg>
+                  <span>Voice soon</span>
+                </button>
+                <span id="voice-hint" class="visually-hidden">Voice input is reserved in the interface and will be available later.</span>
+                <span class="launcher__kbd" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Enter</kbd></span>
+                <button type="submit" id="launcher-submit">
+                  Build visualization
+                  <span aria-hidden="true">&rarr;</span>
+                </button>
+              </div>
+              <p id="launcher-error" class="launcher__error" hidden></p>
+              <p class="launcher__scope">Educational, non-patient-specific visualization. Not for diagnosis or clinical planning.</p>
+            </form>
+          </div>
+
+          <section class="launcher__ideas" aria-labelledby="idea-title">
+            <div class="launcher__section-head">
+              <h2 id="idea-title">Start with an example</h2>
+              <p>Tap to adapt</p>
             </div>
-            <p id="launcher-error" class="launcher__error" hidden></p>
-            <p class="launcher__scope">Educational, non-patient-specific visualization. Not for diagnosis or clinical planning.</p>
-          </form>
-          <div id="launcher-examples" class="launcher__examples"></div>
+            <div id="launcher-examples" class="launcher__examples"></div>
+          </section>
           <aside id="launcher-recent" class="launcher__recent" hidden></aside>
         </div>
       </section>
@@ -41,16 +78,26 @@
       <aside id="workflow-panel" class="console" hidden aria-live="polite">
         <header class="console__bar">
           <a class="console__home" href="/viewer/" aria-label="All runs">
-            <span aria-hidden="true">&larr;</span> Runs
+            <span aria-hidden="true">&larr;</span><span class="console__home-label">SeeIn</span>
           </a>
-          <button type="button" id="console-stop" class="console__stop" hidden>Stop run</button>
-          <button
-            type="button"
-            id="console-toggle"
-            class="console__toggle"
-            aria-expanded="true"
-            aria-controls="console-body"
-          >Hide</button>
+          <button type="button" id="console-peek" class="console__peek" aria-label="Expand run status">
+            <span id="console-peek-progress"></span>
+            <strong id="console-peek-node">Preparing</strong>
+          </button>
+          <div class="console__tools">
+            <button type="button" id="dossier-open" class="console__dossier" hidden>
+              <span class="console__dossier-dot" aria-hidden="true"></span>
+              Dossier
+            </button>
+            <button type="button" id="console-stop" class="console__stop" hidden>Stop</button>
+            <button
+              type="button"
+              id="console-toggle"
+              class="console__toggle"
+              aria-expanded="true"
+              aria-controls="console-body"
+            >Hide</button>
+          </div>
         </header>
 
         <div id="console-body" class="console__body">
@@ -73,13 +120,28 @@
           <div id="workflow-action" class="console__action"></div>
 
           <!-- Everything already done, folded away until asked for. -->
-          <details id="activity" class="fold" open hidden>
-            <summary>Activity &amp; diagnostics</summary>
+          <details id="activity" class="fold" hidden>
+            <summary>Run details &amp; diagnostics</summary>
             <ol id="workflow-steps" class="ledger"></ol>
             <ol id="activity-list" class="activity"></ol>
           </details>
         </div>
       </aside>
+
+      <!-- The evidence stays out of the primary flow until the user asks for it. -->
+      <div id="dossier-layer" class="dossier-layer" hidden>
+        <button id="dossier-scrim" class="dossier__scrim" type="button" aria-label="Close research dossier"></button>
+        <aside id="dossier" class="dossier" role="dialog" aria-modal="true" aria-labelledby="dossier-title">
+          <header class="dossier__bar">
+            <div>
+              <p class="wordmark">Evidence library</p>
+              <h2 id="dossier-title">Research dossier</h2>
+            </div>
+            <button id="dossier-close" class="dossier__close" type="button" aria-label="Close research dossier">Close</button>
+          </header>
+          <div id="dossier-content" class="dossier__content"></div>
+        </aside>
+      </div>
 
       <header class="scene-head">
         <h1 id="scene-title">Loading</h1>

@@ -34,9 +34,9 @@
       ]
     },
     {
-      "id": "seein-hepatobiliary-atlas",
-      "source": "renderer/atlas/HepatobiliaryAtlas.tsx",
-      "purpose": "High-detail right hepatic hilum registered to the Surgical Atlas patient, including a HuBMAP liver surface and continuous gallbladder, biliary, arterial, portal, and operative-plane anatomy.",
+      "id": "seein-right-upper-quadrant-registration",
+      "source": "renderer/atlas/anatomical-registry.json",
+      "purpose": "Stable right-upper-quadrant centres, nominal extents, attachment landmarks, and human-frame registration for request-specific generated hepatobiliary anatomy. The calibrated HuBMAP liver scaffold is implemented separately in renderer/atlas/RegisteredOrganAssets.tsx.",
       "registrationNotes": [
         "The regional origin is the calibrated right subhepatic/hilar origin from the Surgical Atlas patient.",
         "Normal structure centres and extents are fixed; phase, exposure, pathology, anatomical variation, instruments, overlays, and cameras remain request-specific.",
@@ -128,81 +128,81 @@
       "id": "liver", "label": "Liver", "frameId": "right-upper-quadrant",
       "centerCm": [-1.05, 4.4, -7.1], "sizeCm": [19.2, 17.5, 19.4], "orientation": [0, 0, 0],
       "landmarks": ["porta-hepatis", "gallbladder-fossa", "segment-ivb", "segment-v", "rouviere-sulcus"],
-      "sourceSceneId": "seein-hepatobiliary-atlas", "sourceSymbol": "HepatobiliaryAtlas.Liver",
+      "sourceSceneId": "seein-right-upper-quadrant-registration", "sourceSymbol": "registered liver bounds and CalibratedLiverSurface",
       "registrationMethod": "HuBMAP liver mesh bounds fitted to the transformed SurgicalScene liver and right subhepatic origin."
     },
     {
       "id": "gallbladder", "label": "Gallbladder", "frameId": "right-upper-quadrant",
       "centerCm": [-2.8, 3.35, 3.25], "sizeCm": [3.2, 7.4, 2.5], "orientation": [0.1, -0.12, -0.34],
       "landmarks": ["gallbladder-fundus", "gallbladder-body", "hartmann-pouch", "gallbladder-neck"],
-      "sourceSceneId": "seein-hepatobiliary-atlas", "sourceSymbol": "HepatobiliaryAtlas.Gallbladder",
+      "sourceSceneId": "seein-right-upper-quadrant-registration", "sourceSymbol": "registered gallbladder envelope",
       "registrationMethod": "Continuous gallbladder surface calibrated to the transformed SurgicalScene gallbladder fossa."
     },
     {
       "id": "gallbladder-neck", "label": "Gallbladder neck", "frameId": "right-upper-quadrant",
       "centerCm": [-1.52, 0.42, 2.2], "sizeCm": [0.8, 1.2, 0.8], "orientation": [0, 0, 0],
-      "landmarks": ["cystic-duct-origin"], "sourceSceneId": "seein-hepatobiliary-atlas",
-      "sourceSymbol": "HepatobiliaryAtlas.Gallbladder neck point", "registrationMethod": "Fixed local endpoint shared by gallbladder and cystic duct."
+      "landmarks": ["cystic-duct-origin"], "sourceSceneId": "seein-right-upper-quadrant-registration",
+      "sourceSymbol": "registered gallbladder-neck junction", "registrationMethod": "Fixed local endpoint shared by gallbladder and cystic duct."
     },
     {
       "id": "cystic-duct", "label": "Cystic duct", "frameId": "right-upper-quadrant",
       "centerCm": [-0.8, 0.02, 1.85], "sizeCm": [1.6, 1.7, 1.2], "orientation": [0, 0, 0],
-      "landmarks": ["gallbladder-neck", "cystic-duct-junction"], "sourceSceneId": "seein-hepatobiliary-atlas",
-      "sourceSymbol": "HepatobiliaryAtlas.cysticDuct", "registrationMethod": "Envelope of the registered normal duct variants; endpoints remain invariant."
+      "landmarks": ["gallbladder-neck", "cystic-duct-junction"], "sourceSceneId": "seein-right-upper-quadrant-registration",
+      "sourceSymbol": "registered cystic-duct envelope", "registrationMethod": "Envelope of the registered normal duct variants; endpoints remain invariant."
     },
     {
       "id": "cystic-duct-junction", "label": "Cystic duct to common hepatic duct junction", "frameId": "right-upper-quadrant",
       "centerCm": [-0.08, -0.38, 1.57], "sizeCm": [0.7, 0.7, 0.7], "orientation": [0, 0, 0],
-      "landmarks": ["cystic-duct", "common-hepatic-duct", "common-bile-duct"], "sourceSceneId": "seein-hepatobiliary-atlas",
-      "sourceSymbol": "HepatobiliaryAtlas.cysticJunction", "registrationMethod": "Exact shared branch coordinate in the continuous extrahepatic biliary tree."
+      "landmarks": ["cystic-duct", "common-hepatic-duct", "common-bile-duct"], "sourceSceneId": "seein-right-upper-quadrant-registration",
+      "sourceSymbol": "registered cystic-duct confluence", "registrationMethod": "Exact shared branch coordinate in the continuous extrahepatic biliary tree."
     },
     {
       "id": "common-hepatic-duct", "label": "Common hepatic duct", "frameId": "right-upper-quadrant",
       "centerCm": [0.06, 1.94, 1.3], "sizeCm": [0.7, 4.9, 0.9], "orientation": [0, 0, 0],
-      "landmarks": ["cystic-duct-junction", "right-hepatic-duct", "left-hepatic-duct"], "sourceSceneId": "seein-hepatobiliary-atlas",
-      "sourceSymbol": "HepatobiliaryAtlas.commonHepaticDuct", "registrationMethod": "Tube-path bounds in the registered centimetre frame."
+      "landmarks": ["cystic-duct-junction", "right-hepatic-duct", "left-hepatic-duct"], "sourceSceneId": "seein-right-upper-quadrant-registration",
+      "sourceSymbol": "registered common-hepatic-duct path", "registrationMethod": "Tube-path bounds in the registered centimetre frame."
     },
     {
       "id": "common-bile-duct", "label": "Common bile duct", "frameId": "right-upper-quadrant",
       "centerCm": [0.25, -2.7, 1.05], "sizeCm": [0.7, 5.2, 0.7], "orientation": [0, 0, 0],
-      "landmarks": ["cystic-duct-junction", "duodenal-entry"], "sourceSceneId": "seein-hepatobiliary-atlas",
-      "sourceSymbol": "HepatobiliaryAtlas.commonBileDuct", "registrationMethod": "Tube-path bounds in the registered centimetre frame."
+      "landmarks": ["cystic-duct-junction", "duodenal-entry"], "sourceSceneId": "seein-right-upper-quadrant-registration",
+      "sourceSymbol": "registered common-bile-duct path", "registrationMethod": "Tube-path bounds in the registered centimetre frame."
     },
     {
       "id": "porta-hepatis", "label": "Porta hepatis", "frameId": "right-upper-quadrant",
       "centerCm": [0.25, 2.1, -0.2], "sizeCm": [6.2, 3.9, 3.6], "orientation": [0, 0, 0],
-      "landmarks": ["portal-vein", "right-hepatic-artery", "common-hepatic-duct"], "sourceSceneId": "seein-hepatobiliary-atlas",
-      "sourceSymbol": "HepatobiliaryAtlas porta-hepatis mesh and triad branches", "registrationMethod": "HuBMAP porta-hepatis surface aligned with the continuous portal triad."
+      "landmarks": ["portal-vein", "right-hepatic-artery", "common-hepatic-duct"], "sourceSceneId": "seein-right-upper-quadrant-registration",
+      "sourceSymbol": "registered porta-hepatis surface and triad junctions", "registrationMethod": "HuBMAP porta-hepatis surface aligned with the continuous portal triad."
     },
     {
       "id": "hepatocystic-triangle", "label": "Hepatocystic triangle", "frameId": "right-upper-quadrant",
       "centerCm": [-0.8, 0.95, 1.7], "sizeCm": [2.7, 2.5, 1.4], "orientation": [0, 0, 0],
-      "landmarks": ["gallbladder-neck", "cystic-duct-junction", "cystic-artery"], "sourceSceneId": "seein-hepatobiliary-atlas",
-      "sourceSymbol": "HepatobiliaryAtlas.hepatocystic-triangle-fibrofatty-tissue", "registrationMethod": "Boundary derived from its three registered anatomical borders."
+      "landmarks": ["gallbladder-neck", "cystic-duct-junction", "cystic-artery"], "sourceSceneId": "seein-right-upper-quadrant-registration",
+      "sourceSymbol": "registered hepatocystic-triangle boundary", "registrationMethod": "Boundary derived from its three registered anatomical borders."
     },
     {
       "id": "cystic-artery", "label": "Cystic artery", "frameId": "right-upper-quadrant",
       "centerCm": [-0.6, 1.36, 1.05], "sizeCm": [2.5, 1.0, 2.0], "orientation": [0, 0, 0],
-      "landmarks": ["right-hepatic-artery", "gallbladder-neck", "hepatocystic-triangle"], "sourceSceneId": "seein-hepatobiliary-atlas",
-      "sourceSymbol": "HepatobiliaryAtlas.cysticArtery", "registrationMethod": "Envelope of standard and Moynihan-hump variants with fixed parent and gallbladder endpoints."
+      "landmarks": ["right-hepatic-artery", "gallbladder-neck", "hepatocystic-triangle"], "sourceSceneId": "seein-right-upper-quadrant-registration",
+      "sourceSymbol": "registered cystic-artery envelope", "registrationMethod": "Envelope of standard and Moynihan-hump variants with fixed parent and gallbladder endpoints."
     },
     {
       "id": "right-hepatic-artery", "label": "Right hepatic artery", "frameId": "right-upper-quadrant",
       "centerCm": [-0.4, 2, 0.05], "sizeCm": [5.8, 5.8, 1], "orientation": [0, 0, 0],
-      "landmarks": ["proper-hepatic-artery", "cystic-artery-origin"], "sourceSceneId": "seein-hepatobiliary-atlas",
-      "sourceSymbol": "HepatobiliaryAtlas.hilar-arteries", "registrationMethod": "Continuous registered hilar arterial path bounds."
+      "landmarks": ["proper-hepatic-artery", "cystic-artery-origin"], "sourceSceneId": "seein-right-upper-quadrant-registration",
+      "sourceSymbol": "registered hilar arterial paths", "registrationMethod": "Continuous registered hilar arterial path bounds."
     },
     {
       "id": "portal-vein", "label": "Main portal vein", "frameId": "right-upper-quadrant",
       "centerCm": [0.5, 0.3, -1.6], "sizeCm": [1.2, 8.8, 1.2], "orientation": [0, 0, 0],
-      "landmarks": ["porta-hepatis", "right-portal-branch", "left-portal-branch"], "sourceSceneId": "seein-hepatobiliary-atlas",
-      "sourceSymbol": "HepatobiliaryAtlas.deep-portal-vein", "registrationMethod": "Continuous portal trunk and branch-path bounds."
+      "landmarks": ["porta-hepatis", "right-portal-branch", "left-portal-branch"], "sourceSceneId": "seein-right-upper-quadrant-registration",
+      "sourceSymbol": "registered portal trunk and branches", "registrationMethod": "Continuous portal trunk and branch-path bounds."
     },
     {
       "id": "rouviere-sulcus", "label": "Rouviere sulcus", "frameId": "right-upper-quadrant",
       "centerCm": [-2.6, 1.55, 1.15], "sizeCm": [6.6, 1.7, 1.2], "orientation": [0, 0, 0],
-      "landmarks": ["segment-v", "right-portal-pedicle", "r4u-safety-plane"], "sourceSceneId": "seein-hepatobiliary-atlas",
-      "sourceSymbol": "HepatobiliaryAtlas.rouviere-r4u-safety-plane", "registrationMethod": "Registered safety-line path on the inferior liver surface."
+      "landmarks": ["segment-v", "right-portal-pedicle", "r4u-safety-plane"], "sourceSceneId": "seein-right-upper-quadrant-registration",
+      "sourceSymbol": "registered Rouviere-sulcus and R4U path", "registrationMethod": "Registered safety-line path on the inferior liver surface."
     },
 
     {

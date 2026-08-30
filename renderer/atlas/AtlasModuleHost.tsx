@@ -100,6 +100,7 @@ export function AtlasModuleHost({
   Scene: SurgicalSceneComponent;
 }) {
   const query = useMemo(() => new URLSearchParams(window.location.search), []);
+  const qaMode = query.get("qa") === "1";
   const requestedView = query.get("view") ?? "";
   const requestedStep = query.get("state")
     ?? definition.qaViews.find((view) => view.id === requestedView)?.stepId
@@ -108,7 +109,7 @@ export function AtlasModuleHost({
     definition.steps.some((step) => step.id === requestedStep) ? requestedStep : definition.steps[0]!.id,
   );
   const [showLabels, setShowLabels] = useState(
-    definition.steps.find((step) => step.id === requestedStep)?.showLabels ?? true,
+    qaMode ? false : definition.steps.find((step) => step.id === requestedStep)?.showLabels ?? true,
   );
   const [transparentPatient, setTransparentPatient] = useState(
     definition.steps.find((step) => step.id === requestedStep)?.transparentPatient ?? true,
@@ -121,7 +122,7 @@ export function AtlasModuleHost({
     const next = definition.steps.find((candidate) => candidate.id === nextId);
     if (!next) return;
     setStepId(next.id);
-    setShowLabels(next.showLabels);
+    setShowLabels(qaMode ? false : next.showLabels);
     setTransparentPatient(next.transparentPatient);
   };
 

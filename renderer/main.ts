@@ -36,10 +36,43 @@ interface WorkflowGraphState {
   };
   researchDossier?: {
     brief: {
-      sources: Array<{ url: string; title: string }>;
-      references: Array<{ imageUrl: string; sourceUrl: string; title: string }>;
+      concept: string;
+      summary: string;
+      visualNotes: string[];
+      objectNotes: string[];
+      styleKeywords: string[];
+      sources: Array<{ url: string; title: string; note?: string }>;
+      references: Array<{ imageUrl: string; sourceUrl: string; title: string; relevance?: string }>;
     };
-    objectStudies: Array<{ id: string; name: string; identityMarkers: string[]; referenceImageUrls?: string[] }>;
+    objectStudies: Array<{
+      id: string;
+      name: string;
+      role: string;
+      identityMarkers: string[];
+      components: string[];
+      materials: string[];
+      proportionAndScale: string[];
+      spatialRelationships: string[];
+      sourceUrls: string[];
+      referenceImageUrls?: string[];
+      uncertainty?: string;
+    }>;
+    intentCoverage: Array<{ requirement: string; evidence: string; objectStudyIds: string[] }>;
+    contradictions: string[];
+    unresolvedQuestions: string[];
+    perspectives: Array<{
+      perspectiveId: string;
+      summary: string;
+      findings: Array<{
+        claim: string;
+        whyItMatters: string;
+        sourceUrls: string[];
+        confidence: "high" | "medium" | "low";
+      }>;
+      sources: Array<{ url: string; title: string; note?: string }>;
+      references: Array<{ imageUrl: string; sourceUrl: string; title: string; relevance?: string }>;
+      unansweredQuestions: string[];
+    }>;
     searchAttribution?: { model: string; queries: string[]; renderedContent: string };
     readiness: {
       decision: "ready" | "needs-research" | "needs-user";
@@ -47,6 +80,7 @@ interface WorkflowGraphState {
       checks: Array<{ id: string; label: string; passed: boolean; evidence: string }>;
       gaps: string[];
     };
+    generatedAt?: string;
   };
   finalSceneRevision?: number;
   finalInspection?: {
@@ -89,6 +123,7 @@ interface WorkflowGraphState {
 }
 
 interface InteractionResponse {
+  project?: { projectId: string; prompt: string };
   state: WorkflowGraphState;
   sceneUrl: string;
 }
@@ -132,9 +167,18 @@ const workflowOperationRoute = requiredElement("#workflow-operation-route");
 const workflowOperationDetail = requiredElement("#workflow-operation-detail");
 const activity = requiredElement("#activity") as HTMLDetailsElement;
 const activityList = requiredElement("#activity-list");
+const consolePeek = requiredElement("#console-peek") as HTMLButtonElement;
+const consolePeekProgress = requiredElement("#console-peek-progress");
+const consolePeekNode = requiredElement("#console-peek-node");
+const dossierOpen = requiredElement("#dossier-open") as HTMLButtonElement;
+const dossierLayer = requiredElement("#dossier-layer");
+const dossierClose = requiredElement("#dossier-close") as HTMLButtonElement;
+const dossierScrim = requiredElement("#dossier-scrim") as HTMLButtonElement;
+const dossierContent = requiredElement("#dossier-content");
 
 // Assigned by runGuidedViewer, which can run during module evaluation.
 let restartPolling: (() => void) | null = null;
+let dossierReturnFocus: HTMLElement | null = null;
 
 const LAUNCHER_EXAMPLES = [
   "Right hepatic hilum anatomy for laparoscopic cholecystectomy, including Calot’s triangle and structures at risk",
@@ -184,6 +228,7 @@ async function showLauncher(): Promise<void> {
   const submit = requiredElement("#launcher-submit") as HTMLButtonElement;
   const errorLine = requiredElement("#launcher-error");
   const examples = requiredElement("#launcher-examples");
+  const voice = requiredElement("#voice-input") as HTMLButtonElement;
 
     launcher.hidden = false;
   status.hidden = true;
@@ -220,6 +265,16 @@ async function showLauncher(): Promise<void> {
   // Cmd/Ctrl+Enter submits without reaching for the mouse.
   prompt.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) form.requestSubmit();
+  });
+
+  voice.addEventListener("click", () => {
+    voice.dataset.notice = "true";
+    const label = voice.querySelector("span");
+    if (label) label.textContent = "Voice input is coming";
+    window.setTimeout(() => {
+      voice.dataset.notice = "false";
+      if (label) label.textContent = "Voice soon";
+    }, 1800);
   });
 
   await listRecentRuns();
@@ -714,15 +769,407 @@ function wireStop(projectId: string, refresh: () => Promise<void>): void {
 }
 
 function wireConsoleToggle(): void {
+  if (workflowPanel.dataset.wired === "true") return;
+  workflowPanel.dataset.wired = "true";
   const setCollapsed = (collapsed: boolean): void => {
     workflowPanel.dataset.collapsed = String(collapsed);
     consoleToggle.textContent = collapsed ? "Show" : "Hide";
     consoleToggle.setAttribute("aria-expanded", String(!collapsed));
+    consolePeek.setAttribute("aria-expanded", String(!collapsed));
   };
-  setCollapsed(false);
+  setCollapsed(matchMedia("(max-width: 860px)").matches);
   consoleToggle.addEventListener("click", () => {
     setCollapsed(workflowPanel.dataset.collapsed !== "true");
   });
+  consolePeek.addEventListener("click", () => setCollapsed(false));
+}
+
+function openResearchDossier(): void {
+  dossierReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  dossierLayer.hidden = false;
+  document.documentElement.classList.add("has-dossier");
+  dossierClose.focus();
+}
+
+function closeResearchDossier(): void {
+  dossierLayer.hidden = true;
+  document.documentElement.classList.remove("has-dossier");
+  dossierReturnFocus?.focus();
+  dossierReturnFocus = null;
+}
+
+dossierOpen.addEventListener("click", openResearchDossier);
+dossierClose.addEventListener("click", closeResearchDossier);
+dossierScrim.addEventListener("click", closeResearchDossier);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !dossierLayer.hidden) closeResearchDossier();
+});
+
+type ResearchDossier = NonNullable<WorkflowGraphState["researchDossier"]>;
+
+function renderResearchDossier(projectId: string, dossier: ResearchDossier | undefined): void {
+  dossierOpen.hidden = !dossier;
+  if (!dossier) {
+    if (!dossierLayer.hidden) closeResearchDossier();
+    dossierContent.replaceChildren();
+    return;
+  }
+
+  const allReferences = uniqueBy(
+    [
+      ...dossier.brief.references,
+      ...dossier.perspectives.flatMap((perspective) => perspective.references),
+      ...dossier.objectStudies.flatMap((study) => (study.referenceImageUrls ?? []).map((imageUrl) => ({
+        imageUrl,
+        sourceUrl: study.sourceUrls[0] ?? imageUrl,
+        title: study.name,
+        relevance: study.role,
+      }))),
+    ],
+    (reference) => reference.imageUrl,
+  );
+  const allSources = uniqueBy(
+    [...dossier.brief.sources, ...dossier.perspectives.flatMap((perspective) => perspective.sources)],
+    (source) => source.url,
+  );
+  const passed = dossier.readiness.checks.filter((check) => check.passed).length;
+
+  const hero = document.createElement("section");
+  hero.className = "dossier-hero";
+  const heroMeta = document.createElement("p");
+  heroMeta.className = "dossier-hero__meta";
+  heroMeta.textContent = dossier.generatedAt
+    ? `Compiled ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(dossier.generatedAt))}`
+    : "Live research record";
+  const heroTitle = document.createElement("h3");
+  heroTitle.textContent = dossier.brief.concept;
+  const heroSummary = document.createElement("p");
+  heroSummary.textContent = dossier.brief.summary;
+  hero.append(heroMeta, heroTitle, heroSummary);
+
+  const index = document.createElement("nav");
+  index.className = "dossier-index";
+  index.setAttribute("aria-label", "Dossier sections");
+  const stats: Array<[string, string, string]> = [
+    ["Sources", String(allSources.length), "sources"],
+    ["Reference images", String(allReferences.length), "images"],
+    ["Anatomy studies", String(dossier.objectStudies.length), "anatomy"],
+    ["Readiness", `${Math.round(dossier.readiness.score * 100)}%`, "readiness"],
+  ];
+  for (const [label, value, target] of stats) {
+    const link = document.createElement("a");
+    link.href = `#dossier-${target}`;
+    const number = document.createElement("strong");
+    number.textContent = value;
+    const caption = document.createElement("span");
+    caption.textContent = label;
+    link.append(number, caption);
+    index.append(link);
+  }
+
+  const overview = dossierSection("overview", "Research overview", "The visual decisions the model will follow.");
+  const lenses = document.createElement("div");
+  lenses.className = "dossier-lenses";
+  for (const perspective of dossier.perspectives) {
+    const card = document.createElement("details");
+    card.className = "dossier-lens";
+    const summary = document.createElement("summary");
+    const name = document.createElement("strong");
+    name.textContent = perspectiveLabel(perspective.perspectiveId);
+    const count = document.createElement("span");
+    count.textContent = `${perspective.findings.length} findings`;
+    summary.append(name, count);
+    const intro = document.createElement("p");
+    intro.textContent = perspective.summary;
+    const findings = document.createElement("ol");
+    findings.className = "dossier-findings";
+    for (const finding of perspective.findings) {
+      const item = document.createElement("li");
+      const claim = document.createElement("p");
+      claim.textContent = finding.claim;
+      const why = document.createElement("p");
+      why.className = "dossier-muted";
+      why.textContent = finding.whyItMatters;
+      const confidence = document.createElement("span");
+      confidence.className = "confidence";
+      confidence.dataset.level = finding.confidence;
+      confidence.textContent = `${finding.confidence} confidence`;
+      item.append(confidence, claim, why);
+      findings.append(item);
+    }
+    card.append(summary, intro, findings);
+    lenses.append(card);
+  }
+  const decisionNotes = document.createElement("div");
+  decisionNotes.className = "dossier-notes";
+  for (const note of dossier.brief.visualNotes) {
+    const item = document.createElement("p");
+    item.textContent = note;
+    decisionNotes.append(item);
+  }
+  overview.body.append(lenses, subsectionTitle("Visual instructions"), decisionNotes);
+
+  const anatomy = dossierSection("anatomy", "Anatomy studies", "Construction notes, scale, relationships, uncertainty, and supporting references for every structure.");
+  const anatomyList = document.createElement("div");
+  anatomyList.className = "anatomy-studies";
+  for (const study of dossier.objectStudies) {
+    const detail = document.createElement("details");
+    detail.className = "anatomy-study";
+    const summary = document.createElement("summary");
+    const title = document.createElement("span");
+    title.innerHTML = `<strong>${escapeMarkup(study.name)}</strong><small>${escapeMarkup(study.role)}</small>`;
+    const marker = document.createElement("span");
+    marker.className = "anatomy-study__count";
+    marker.textContent = `${study.identityMarkers.length} markers`;
+    summary.append(title, marker);
+    const body = document.createElement("div");
+    body.className = "anatomy-study__body";
+    const studyImages = allReferences.filter((reference) => study.referenceImageUrls?.includes(reference.imageUrl));
+    if (studyImages.length > 0) body.append(referenceGallery(studyImages.slice(0, 6), true));
+    body.append(
+      studyList("Identity markers", study.identityMarkers),
+      studyList("Spatial relationships", study.spatialRelationships),
+      studyList("Components", study.components),
+      studyList("Tissue & material cues", study.materials),
+      studyList("Proportion & scale", study.proportionAndScale),
+    );
+    if (study.uncertainty) {
+      const uncertainty = document.createElement("p");
+      uncertainty.className = "dossier-callout";
+      uncertainty.textContent = `Uncertainty: ${study.uncertainty}`;
+      body.append(uncertainty);
+    }
+    detail.append(summary, body);
+    anatomyList.append(detail);
+  }
+  anatomy.body.append(anatomyList);
+
+  const images = dossierSection("images", "Reference images", "The visual library collected during research. Open any item at its original source.");
+  images.body.append(referenceGallery(allReferences));
+
+  const sources = dossierSection("sources", "Sources & resources", "Every retrieved document remains available for inspection.");
+  const sourceList = document.createElement("ol");
+  sourceList.className = "source-library";
+  for (const source of allSources) {
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = source.url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    const domain = document.createElement("span");
+    domain.textContent = hostname(source.url);
+    const label = document.createElement("strong");
+    label.textContent = source.title;
+    link.append(domain, label);
+    if (source.note) {
+      const note = document.createElement("p");
+      note.textContent = source.note;
+      item.append(link, note);
+    } else {
+      item.append(link);
+    }
+    sourceList.append(item);
+  }
+  sources.body.append(sourceList);
+
+  const readiness = dossierSection("readiness", "Coverage & readiness", `${passed} of ${dossier.readiness.checks.length} evidence checks passed.`);
+  const readinessGrid = document.createElement("div");
+  readinessGrid.className = "readiness-grid";
+  for (const check of dossier.readiness.checks) {
+    const row = document.createElement("article");
+    row.className = "readiness-row";
+    row.dataset.passed = String(check.passed);
+    const label = document.createElement("strong");
+    label.textContent = check.label;
+    const evidence = document.createElement("p");
+    evidence.textContent = check.evidence;
+    row.append(label, evidence);
+    readinessGrid.append(row);
+  }
+  const coverage = document.createElement("div");
+  coverage.className = "coverage-list";
+  for (const item of dossier.intentCoverage) {
+    const detail = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = item.requirement;
+    const evidence = document.createElement("p");
+    evidence.textContent = item.evidence;
+    detail.append(summary, evidence);
+    coverage.append(detail);
+  }
+  readiness.body.append(readinessGrid, subsectionTitle("Clinical intent coverage"), coverage);
+
+  const trace = dossierSection("trace", "Research trace", "Queries, tensions, and remaining unknowns stay available without crowding the main experience.");
+  const transparency = document.createElement("div");
+  transparency.className = "trace-grid";
+  transparency.append(
+    traceCard("Contradictions resolved", dossier.contradictions, "No contradictions were recorded."),
+    traceCard("Open questions", dossier.unresolvedQuestions, "No blocking questions remain."),
+  );
+  trace.body.append(transparency);
+  if (dossier.searchAttribution) {
+    const search = document.createElement("details");
+    search.className = "search-trace";
+    const summary = document.createElement("summary");
+    summary.textContent = `Search trace · ${dossier.searchAttribution.queries.length} queries · ${dossier.searchAttribution.model}`;
+    const queryList = document.createElement("ul");
+    for (const query of dossier.searchAttribution.queries) {
+      const item = document.createElement("li");
+      item.textContent = query;
+      queryList.append(item);
+    }
+    const raw = document.createElement("details");
+    raw.className = "search-trace__raw";
+    const rawSummary = document.createElement("summary");
+    rawSummary.textContent = "Rendered search attribution";
+    const pre = document.createElement("pre");
+    pre.textContent = dossier.searchAttribution.renderedContent;
+    raw.append(rawSummary, pre);
+    search.append(summary, queryList, raw);
+    trace.body.append(search);
+  }
+
+  const footer = document.createElement("footer");
+  footer.className = "dossier-footer";
+  const note = document.createElement("p");
+  note.textContent = "This dossier is an audit trail for an educational visualization, not clinical guidance.";
+  const rawLink = document.createElement("a");
+  rawLink.href = `/api/projects/${encodeURIComponent(projectId)}/interaction`;
+  rawLink.target = "_blank";
+  rawLink.rel = "noreferrer";
+  rawLink.textContent = "Open machine-readable record";
+  footer.append(note, rawLink);
+
+  dossierContent.replaceChildren(hero, index, overview.section, anatomy.section, images.section, sources.section, readiness.section, trace.section, footer);
+}
+
+function dossierSection(id: string, title: string, description: string): { section: HTMLElement; body: HTMLElement } {
+  const section = document.createElement("section");
+  section.id = `dossier-${id}`;
+  section.className = "dossier-section";
+  const head = document.createElement("header");
+  const eyebrow = document.createElement("p");
+  eyebrow.className = "dossier-section__index";
+  eyebrow.textContent = String(document.querySelectorAll(".dossier-section").length + 1).padStart(2, "0");
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  const lede = document.createElement("p");
+  lede.textContent = description;
+  head.append(eyebrow, heading, lede);
+  const body = document.createElement("div");
+  body.className = "dossier-section__body";
+  section.append(head, body);
+  return { section, body };
+}
+
+function subsectionTitle(label: string): HTMLElement {
+  const title = document.createElement("h4");
+  title.className = "dossier-subtitle";
+  title.textContent = label;
+  return title;
+}
+
+function studyList(label: string, values: string[]): HTMLElement {
+  const group = document.createElement("section");
+  group.className = "study-list";
+  const title = document.createElement("h4");
+  title.textContent = label;
+  const list = document.createElement("ul");
+  for (const value of values) {
+    const item = document.createElement("li");
+    item.textContent = value;
+    list.append(item);
+  }
+  group.append(title, list);
+  return group;
+}
+
+function referenceGallery(references: ResearchDossier["brief"]["references"], compact = false): HTMLElement {
+  const gallery = document.createElement("div");
+  gallery.className = compact ? "reference-gallery reference-gallery--compact" : "reference-gallery";
+  for (const reference of references) {
+    const link = document.createElement("a");
+    link.href = reference.sourceUrl;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    const figure = document.createElement("figure");
+    const image = document.createElement("img");
+    image.src = reference.imageUrl;
+    image.alt = reference.title;
+    image.loading = "lazy";
+    image.addEventListener("error", () => {
+      figure.dataset.unavailable = "true";
+      image.remove();
+    });
+    const caption = document.createElement("figcaption");
+    const title = document.createElement("strong");
+    title.textContent = reference.title;
+    const domain = document.createElement("span");
+    domain.textContent = hostname(reference.sourceUrl);
+    caption.append(title, domain);
+    figure.append(image, caption);
+    link.append(figure);
+    gallery.append(link);
+  }
+  if (references.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "dossier-muted";
+    empty.textContent = "No reference images were retained for this run.";
+    gallery.append(empty);
+  }
+  return gallery;
+}
+
+function traceCard(titleText: string, values: string[], emptyText: string): HTMLElement {
+  const card = document.createElement("article");
+  const title = document.createElement("h4");
+  title.textContent = titleText;
+  const list = document.createElement("ul");
+  const items = values.length > 0 ? values : [emptyText];
+  for (const value of items) {
+    const item = document.createElement("li");
+    item.textContent = value;
+    list.append(item);
+  }
+  card.append(title, list);
+  return card;
+}
+
+function perspectiveLabel(value: string): string {
+  const labels: Record<string, string> = {
+    "visual-identity": "Visual identity",
+    "structure-material": "Structure & tissue",
+    "context-variants": "Context & variation",
+  };
+  return labels[value] ?? humanize(value);
+}
+
+function hostname(value: string): string {
+  try {
+    return new URL(value).hostname.replace(/^www\./, "");
+  } catch {
+    return "source";
+  }
+}
+
+function uniqueBy<T>(items: T[], key: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const value = key(item);
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
+function escapeMarkup(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#039;",
+  })[character] ?? character);
 }
 
 async function runGuidedViewer(projectId: string): Promise<void> {
@@ -744,6 +1191,7 @@ async function runGuidedViewer(projectId: string): Promise<void> {
     const interaction = (await response.json()) as InteractionResponse;
     if (interaction.state.sequence !== lastSequence) {
       lastSequence = interaction.state.sequence;
+      renderResearchDossier(projectId, interaction.state.researchDossier);
       renderWorkflowAction(projectId, interaction.state, refresh);
       // The clock measures the current node, so it restarts whenever the node does.
       if (interaction.state.currentNode !== lastNode) {
@@ -986,12 +1434,14 @@ function renderApprovalModal(
     actions.append(research);
   }
 
-  const details = document.createElement("a");
+  const details = document.createElement("button");
+  details.type = "button";
   details.className = "modal__detail-link";
-  details.href = `/api/projects/${encodeURIComponent(projectId)}/interaction`;
-  details.target = "_blank";
-  details.rel = "noreferrer";
-  details.textContent = "See the full dossier";
+  details.textContent = "Review the research dossier";
+  details.addEventListener("click", () => {
+    modal.close();
+    openResearchDossier();
+  });
 
   form.append(actions);
   inner.append(form, details);
@@ -1010,6 +1460,8 @@ function renderWorkflowAction(
   const doneCount = state.steps.filter((step) => step.status === "completed").length;
   const activeIndex = state.steps.findIndex((step) => step.status === "active" || step.status === "waiting");
   workflowProgress.textContent = `Step ${Math.min(state.steps.length, (activeIndex >= 0 ? activeIndex : doneCount) + 1)} of ${state.steps.length}`;
+  consolePeekProgress.textContent = workflowProgress.textContent;
+  consolePeekNode.textContent = humanize(state.currentNode);
   activity.hidden = false;
   workflowSteps.replaceChildren(
     ...state.steps.map((step, index) => {

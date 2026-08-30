@@ -1,5 +1,4 @@
-LICENSE
-=======
+# LICENSE
 
 Table of contents
 -----------------
@@ -14,7 +13,7 @@ A. The overall license setup for MakeHuman
 
 The MakeHuman application consists of two separate parts:
 
-* Source code: the program logic that powers the application. 
+* Source code: the program logic that powers the application.
 * Assets: The graphical data that the application operates on
 
 B. The license for the source code as such
@@ -42,8 +41,8 @@ Copyright (C) 2001-2020  MakeHuman Team (www.makehumancommunity.org)
 
     You should have received a copy of the GNU Affero General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
-   
-For the full text of the source code license, see 
+
+For the full text of the source code license, see
 [LICENSE.CODE.md](LICENSE.CODE.md)
 
 C. The license for the bundled assets
@@ -59,7 +58,7 @@ MakeHuman. This includes:
 * Poses and expressions
 
 These assets have been released under CC0 1.0 Universal. In summary this means
-that to the fullest extent possible, it is the intention of the MakeHuman 
+that to the fullest extent possible, it is the intention of the MakeHuman
 project that anyone can do whatever they want with it.
 
 For the full text of the legal statement regarding the assets, see
@@ -70,7 +69,7 @@ D. Concerning the output from MakeHuman
 
 It is the opinion of the MakeHuman project that no output from MakeHuman
 contains any trace of program logic. That is, regardless of whether you use
-the UI as such or if you call functions of MakeHuman via a script (such as 
+the UI as such or if you call functions of MakeHuman via a script (such as
 via the blender importer), what you get is a combination of assets and your
 own creative input. As the assets have been released under CC0, there is no
 limitation on what you can do with this combined output.
@@ -88,8 +87,8 @@ such as:
 We regard these things as your data, which is yours to handle as you see
 fit.
 
-Note that what is discussed here are only assets bundled in the MakeHuman 
-distribution. If you use a third part asset, such as one downloaded from the 
+Note that what is discussed here are only assets bundled in the MakeHuman
+distribution. If you use a third part asset, such as one downloaded from the
 asset repositories, it is your own responsibility to make sure you abide by
 its specific license. That license might be different from the one covering
 the assets bundled by MakeHuman.
