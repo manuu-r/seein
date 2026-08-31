@@ -124,6 +124,18 @@
           <!-- The answer to "what does it need from me". Dominant when present. -->
           <div id="workflow-action" class="console__action"></div>
 
+          <!-- Playwright captures arrive here one view at a time during visual QA. -->
+          <section id="render-gallery" class="render-gallery" hidden aria-labelledby="render-gallery-title">
+            <header class="render-gallery__head">
+              <div>
+                <p class="render-gallery__eyebrow">Visual QA</p>
+                <h2 id="render-gallery-title">Rendered views</h2>
+              </div>
+              <span id="render-gallery-count" class="render-gallery__count"></span>
+            </header>
+            <div id="render-gallery-list" class="render-gallery__list"></div>
+          </section>
+
           <!-- Everything already done, folded away until asked for. -->
           <details id="activity" class="fold" hidden>
             <summary>Run details &amp; diagnostics</summary>
@@ -162,6 +174,9 @@
 
       <!-- Decisions are modal: they block, so they should look like they block. -->
       <dialog id="modal" class="modal" aria-labelledby="modal-title"></dialog>
+
+      <!-- A dedicated image viewer avoids colliding with workflow decision dialogs. -->
+      <dialog id="render-preview" class="render-preview" aria-labelledby="render-preview-title"></dialog>
 
       <div id="status" class="readout"></div>
     </main>

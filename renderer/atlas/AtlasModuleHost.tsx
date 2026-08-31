@@ -72,8 +72,12 @@ function CameraRig({ definition, stepId, viewId }: { definition: SurgicalModuleD
   );
 }
 
-function ReadinessProbe({ sceneMounted }: { sceneMounted: boolean }) {
+function ReadinessProbe({ sceneMounted, qaMode }: { sceneMounted: boolean; qaMode: boolean }) {
   const progress = useProgress();
+  const invalidate = useThree((state) => state.invalidate);
+  useEffect(() => {
+    if (qaMode && sceneMounted && !progress.active) invalidate();
+  }, [invalidate, progress.active, qaMode, sceneMounted]);
   useFrame(() => {
     if (!window.__SEEIN_RENDER_STATE__) return;
     window.__SEEIN_RENDER_STATE__.assetsLoaded = sceneMounted && !progress.active;
@@ -84,11 +88,18 @@ function ReadinessProbe({ sceneMounted }: { sceneMounted: boolean }) {
       window.__SEEIN_RENDER_STATE__.stableFrames += 1;
       if (window.__SEEIN_RENDER_STATE__.stableFrames >= 3 && !window.__SEEIN_READY__) {
         window.__SEEIN_READY__ = true;
-        window.parent.postMessage({ type: "seein-module-ready" }, "*");
+        window.parent.postMessage({
+          type: "seein-module-ready",
+          errors: window.__SEEIN_ERRORS__ ?? [],
+          renderState: { ...window.__SEEIN_RENDER_STATE__ },
+        }, "*");
       }
     } else {
       window.__SEEIN_RENDER_STATE__.stableFrames = 0;
     }
+    // QA only needs a deterministic settled frame set. Demand rendering keeps
+    // the exact scene/materials while avoiding an endless software-WebGL loop.
+    if (qaMode && !window.__SEEIN_READY__ && sceneMounted && !progress.active) invalidate();
   });
   return null;
 }
@@ -172,6 +183,7 @@ export function AtlasModuleHost({
       <Canvas
         shadows
         dpr={[1, 1.5]}
+        frameloop={qaMode ? "demand" : "always"}
         camera={{ position: [...step.camera.position], fov: step.camera.fov, near: 0.05, far: 100 }}
         gl={{ antialias: true, alpha: false, powerPreference: "high-performance", preserveDrawingBuffer: true }}
         onCreated={({ gl }) => {
@@ -194,7 +206,7 @@ export function AtlasModuleHost({
           </SceneErrorBoundary>
         </Suspense>
         <CameraRig definition={definition} stepId={stepId} viewId={requestedView} />
-        <ReadinessProbe sceneMounted={sceneMounted} />
+        <ReadinessProbe sceneMounted={sceneMounted} qaMode={qaMode} />
       </Canvas>
 
       <header className="atlas-head">

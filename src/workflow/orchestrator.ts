@@ -1587,9 +1587,13 @@ export class Orchestrator {
       let currentRender = await renderCurrentTarget("initial");
       const initialRender = currentRender.artifact;
       await this.emit(project, "rendering_initial", "completed", {
+        revision: currentRevision,
         targetId: currentTarget.id,
+        targetLabel: currentTarget.label,
         stateId: currentTarget.stateId ?? null,
         viewId: currentTarget.viewId ?? null,
+        renderUrl: currentRender.artifact.url,
+        cacheHit: currentRender.cacheHit,
         browserErrors: currentRender.capture.browserErrors,
         generatedModule: true,
       });
@@ -1696,6 +1700,11 @@ export class Orchestrator {
           await this.emit(project, "rendering_final", "completed", {
             revision: currentRevision,
             targetId: currentTarget.id,
+            targetLabel: currentTarget.label,
+            stateId: currentTarget.stateId ?? null,
+            viewId: currentTarget.viewId ?? null,
+            renderUrl: currentRender.artifact.url,
+            cacheHit: currentRender.cacheHit,
             browserErrors: currentRender.capture.browserErrors,
             generatedModule: true,
           });
@@ -1766,6 +1775,11 @@ export class Orchestrator {
         await this.emit(project, "rendering_final", "completed", {
           revision: currentRevision,
           targetId: currentTarget.id,
+          targetLabel: currentTarget.label,
+          stateId: currentTarget.stateId ?? null,
+          viewId: currentTarget.viewId ?? null,
+          renderUrl: currentRender.artifact.url,
+          cacheHit: currentRender.cacheHit,
           browserErrors: currentRender.capture.browserErrors,
           generatedModule: true,
         });
@@ -2117,6 +2131,9 @@ export class Orchestrator {
             phase: "captured-diagnostics",
             revision: scene.revision,
             targetId: target?.id ?? null,
+            targetLabel: target?.label ?? null,
+            stateId: target?.stateId ?? null,
+            viewId: target?.viewId ?? null,
             diagnosticUrl: diagnosticArtifact.url,
             failureScreenshotUrl: failureScreenshot?.url ?? null,
             rendererDiagnostics: summarizeRendererDiagnostics(diagnostics),

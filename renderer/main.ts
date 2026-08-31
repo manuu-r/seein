@@ -5,6 +5,13 @@ import {
   workflowFailurePresentation,
   type WorkflowTone,
 } from "./workflow-presentation";
+import { buildAtlasModuleUrl } from "./module-url";
+import {
+  deriveRenderGallery,
+  renderScoreSummary,
+  type RenderGalleryEvent,
+  type RenderGalleryItem,
+} from "./render-gallery";
 
 interface Manifest {
   title: string;
@@ -179,6 +186,10 @@ const workflowOperationRoute = requiredElement("#workflow-operation-route");
 const workflowOperationDetail = requiredElement("#workflow-operation-detail");
 const activity = requiredElement("#activity") as HTMLDetailsElement;
 const activityList = requiredElement("#activity-list");
+const renderGallery = requiredElement("#render-gallery");
+const renderGalleryCount = requiredElement("#render-gallery-count");
+const renderGalleryList = requiredElement("#render-gallery-list");
+const renderPreview = requiredElement("#render-preview") as HTMLDialogElement;
 const consolePeek = requiredElement("#console-peek") as HTMLButtonElement;
 const consolePeekProgress = requiredElement("#console-peek-progress");
 const consolePeekNode = requiredElement("#console-peek-node");
@@ -193,10 +204,12 @@ let restartPolling: (() => void) | null = null;
 let dossierReturnFocus: HTMLElement | null = null;
 
 const LAUNCHER_EXAMPLES = [
-  "Laparoscopic cholecystectomy at the right hepatic hilum, including Calot’s triangle and structures at risk",
-  "Low anterior resection pelvic dissection, showing the rectum, urinary bladder, pelvic peritoneal reflection, and mesorectal plane",
-  "Thoracic anatomy for a left lower lobectomy, showing the left lung, heart, tracheobronchial tree, and diaphragm",
-  "Open right inguinal hernia repair showing the deep inguinal ring, inferior epigastric vessels, vas deferens, and iliopubic tract",
+  "Laparoscopic cholecystectomy showing the critical view of safety at the right hepatic hilum",
+  "Transabdominal preperitoneal repair of a right indirect inguinal hernia, showing the deep inguinal ring and mesh coverage",
+  "Laparoscopic appendectomy showing the cecum, appendix, ileocecal junction, and appendix base",
+  "Laparoscopic splenectomy showing the spleen, stomach, pancreas, left kidney, and surrounding attachments",
+  "Laparoscopic right adrenalectomy showing liver retraction, the right adrenal gland, right kidney, and inferior vena cava",
+  "Video-assisted thoracoscopic wedge resection of a small peripheral left-lung nodule",
 ];
 
 
@@ -431,11 +444,14 @@ async function renderAtlasModule(manifest: Manifest): Promise<void> {
   const sceneHead = title.closest(".scene-head") as HTMLElement | null;
   if (sceneHead) sceneHead.style.display = "none";
   const query = new URLSearchParams(location.search);
-  const moduleUrl = privateArtifactUrl(manifest.module.viewerUrl, query.get("artifactBase"));
+  const moduleUrl = buildAtlasModuleUrl(
+    manifest.module.viewerUrl,
+    location.href,
+    query.get("artifactBase"),
+    query,
+  );
   const stateId = query.get("state");
   const viewId = query.get("view");
-  if (stateId) moduleUrl.searchParams.set("state", stateId);
-  if (viewId) moduleUrl.searchParams.set("view", viewId);
 
   const frame = document.createElement("iframe");
   frame.className = "atlas-frame";
@@ -562,25 +578,6 @@ async function renderAtlasModule(manifest: Manifest): Promise<void> {
 }
 
 /**
- * Generated manifests use public artifact URLs so people can open a completed
- * scene. Playwright instead opens the outer viewer at loopback, where it has no
- * IAP browser session. In that one case, load only our own /artifacts files
- * through the supplied private origin. Relative files in the module HTML then
- * stay private as well.
- */
-function privateArtifactUrl(value: string, artifactBase: string | null): URL {
-  const artifact = new URL(value, location.href);
-  if (!artifactBase || !artifact.pathname.startsWith("/artifacts/")) return artifact;
-  try {
-    const base = new URL(artifactBase, location.href);
-    if (base.protocol !== "http:" && base.protocol !== "https:") return artifact;
-    return new URL(`${artifact.pathname}${artifact.search}${artifact.hash}`, base);
-  } catch {
-    return artifact;
-  }
-}
-
-/**
  * Older compiled modules contain the pre-responsive atlas chrome in their bundle.
  * When they are same-origin, layer in the mobile-safe rules so saved runs improve
  * immediately without rewriting their immutable scene artifact.
@@ -617,14 +614,8 @@ function installEmbeddedAtlasCompatibility(frame: HTMLIFrameElement): void {
   }
 }
 
-interface ProjectEvent {
-  kind?: "stage" | "operation";
-  operationId?: string;
+interface ProjectEvent extends RenderGalleryEvent {
   message?: string;
-  stage?: string;
-  status?: string;
-  detail?: Record<string, unknown>;
-  createdAt?: string;
 }
 
 interface ActivityRow {
@@ -728,6 +719,147 @@ function renderGeminiUsage(rows: ActivityRow[]): void {
   workflowTokens.title = `${usage.responses} Gemini response${usage.responses === 1 ? "" : "s"} metered for this project`;
 }
 
+function renderCaptureGallery(events: ProjectEvent[]): void {
+  const items = deriveRenderGallery(events);
+  if (items.length === 0) {
+    renderGallery.hidden = true;
+    renderGalleryCount.textContent = "";
+    renderGalleryList.replaceChildren();
+    return;
+  }
+
+  const rendering = items.filter((item) => item.status === "rendering").length;
+  const failed = items.filter((item) => item.status === "failed").length;
+  const captured = items.length - rendering - failed;
+  renderGalleryCount.textContent = [
+    captured > 0 ? `${captured} ready` : "",
+    rendering > 0 ? `${rendering} rendering` : "",
+    failed > 0 ? `${failed} failed` : "",
+  ].filter(Boolean).join(" · ");
+  renderGalleryList.replaceChildren(...items.slice(0, 12).map(renderCaptureCard));
+  renderGallery.hidden = false;
+}
+
+function renderCaptureCard(item: RenderGalleryItem): HTMLElement {
+  const card = item.imageUrl
+    ? document.createElement("button")
+    : item.diagnosticUrl
+      ? document.createElement("a")
+      : document.createElement("article");
+  card.className = "render-card";
+  card.dataset.status = item.status;
+  if (card instanceof HTMLButtonElement) {
+    card.type = "button";
+    card.title = `Expand ${item.label}`;
+    card.addEventListener("click", () => openRenderPreview(item));
+  } else if (card instanceof HTMLAnchorElement && item.diagnosticUrl) {
+    card.href = item.diagnosticUrl;
+    card.target = "_blank";
+    card.rel = "noreferrer";
+    card.title = `Open renderer diagnostics for ${item.label}`;
+  }
+
+  const media = document.createElement("span");
+  media.className = "render-card__media";
+  const placeholder = document.createElement("span");
+  placeholder.className = "render-card__placeholder";
+  placeholder.textContent = item.status === "rendering" ? "Rendering…" : "Preview unavailable";
+  media.append(placeholder);
+  if (item.imageUrl) {
+    const image = document.createElement("img");
+    image.src = item.imageUrl;
+    image.alt = "";
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.addEventListener("load", () => { placeholder.hidden = true; });
+    image.addEventListener("error", () => { card.dataset.imageError = "true"; });
+    media.append(image);
+  }
+
+  const badge = document.createElement("span");
+  badge.className = "render-card__badge";
+  badge.textContent = renderStatusLabel(item.status);
+  media.append(badge);
+
+  const caption = document.createElement("span");
+  caption.className = "render-card__caption";
+  const label = document.createElement("strong");
+  label.textContent = item.label;
+  const meta = document.createElement("small");
+  const score = renderScoreSummary(item.scores).find((value) => value.startsWith("Visual"));
+  meta.textContent = [
+    item.revision ? `Rev ${String(item.revision).padStart(3, "0")}` : "",
+    item.viewId ?? item.stateId ?? "",
+    score ?? "",
+  ].filter(Boolean).join(" · ");
+  caption.append(label);
+  if (meta.textContent) caption.append(meta);
+  card.append(media, caption);
+  return card;
+}
+
+function openRenderPreview(item: RenderGalleryItem): void {
+  if (!item.imageUrl) return;
+  const shell = document.createElement("div");
+  shell.className = "render-preview__inner";
+  const bar = document.createElement("header");
+  bar.className = "render-preview__bar";
+  const copy = document.createElement("div");
+  const eyebrow = document.createElement("p");
+  eyebrow.className = "render-gallery__eyebrow";
+  eyebrow.textContent = `${renderStatusLabel(item.status)}${item.revision ? ` · Revision ${item.revision}` : ""}`;
+  const title = document.createElement("h2");
+  title.id = "render-preview-title";
+  title.textContent = item.label;
+  copy.append(eyebrow, title);
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "render-preview__close";
+  close.textContent = "Close";
+  close.addEventListener("click", () => renderPreview.close());
+  bar.append(copy, close);
+
+  const image = document.createElement("img");
+  image.src = item.imageUrl;
+  image.alt = `${item.label} Playwright render`;
+  const footer = document.createElement("footer");
+  footer.className = "render-preview__footer";
+  const metadata = [item.stateId, item.viewId, ...renderScoreSummary(item.scores)].filter(Boolean);
+  const detail = document.createElement("p");
+  detail.textContent = metadata.join(" · ") || "Captured by Playwright for visual QA.";
+  footer.append(detail);
+  if (item.diagnosticUrl) {
+    const diagnostics = document.createElement("a");
+    diagnostics.href = item.diagnosticUrl;
+    diagnostics.target = "_blank";
+    diagnostics.rel = "noreferrer";
+    diagnostics.textContent = "Open renderer diagnostics";
+    footer.append(diagnostics);
+  }
+  shell.append(bar, image, footer);
+  renderPreview.replaceChildren(shell);
+  if (!renderPreview.open) renderPreview.showModal();
+}
+
+function renderStatusLabel(status: RenderGalleryItem["status"]): string {
+  return {
+    rendering: "RENDERING",
+    ready: "READY",
+    passed: "PASSED",
+    review: "REVIEW",
+    failed: "ERROR",
+  }[status];
+}
+
+function wireRenderPreview(): void {
+  if (renderPreview.dataset.wired === "true") return;
+  renderPreview.dataset.wired = "true";
+  renderPreview.addEventListener("click", (event) => {
+    if (event.target === renderPreview) renderPreview.close();
+  });
+  renderPreview.addEventListener("close", () => renderPreview.replaceChildren());
+}
+
 function renderLiveOperation(rows: ActivityRow[]): void {
   const operations = rows.filter((row) => row.kind === "operation");
   const current = operations.find((row) => row.status === "started" || row.status === "retrying") ?? operations[0];
@@ -760,6 +892,7 @@ async function renderActivity(projectId: string): Promise<void> {
     .catch(() => null);
   if (!response?.ok) return;
   const { events } = (await response.json()) as { events: ProjectEvent[] };
+  renderCaptureGallery(events);
 
   // Stages collapse into one line, while each provider operation keeps its own row.
   // This makes parallel research calls, source compilation, and render failures visible.
@@ -1339,6 +1472,8 @@ function escapeMarkup(value: string): string {
 async function runGuidedViewer(projectId: string): Promise<void> {
   workflowPanel.hidden = false;
   wireConsoleToggle();
+  wireRenderPreview();
+  setGuidedSceneAvailable(false);
   stageEmpty.hidden = false;
   title.textContent = "Building surgical anatomy";
   status.textContent = "Waiting for the backend graph…";
@@ -1346,6 +1481,7 @@ async function runGuidedViewer(projectId: string): Promise<void> {
   let lastNode = "";
   let stopElapsed: (() => void) | null = null;
   let sceneMounted = false;
+  let sceneMounting = false;
   let stopped = false;
   let timer = 0;
 
@@ -1370,10 +1506,19 @@ async function runGuidedViewer(projectId: string): Promise<void> {
     nowSection.dataset.working = String(interaction.state.status === "running");
     consoleStop.hidden = interaction.state.status !== "running";
     await renderActivity(projectId);
-    if (!sceneMounted && interaction.state.finalSceneRevision) {
-      sceneMounted = true;
+    if (!sceneMounted && !sceneMounting && interaction.state.finalSceneRevision) {
+      sceneMounting = true;
       stageEmpty.hidden = true;
-      await renderManifest(interaction.sceneUrl);
+      try {
+        await renderManifest(interaction.sceneUrl);
+        sceneMounted = true;
+        setGuidedSceneAvailable(true);
+      } catch (error) {
+        stageEmpty.hidden = false;
+        throw error;
+      } finally {
+        sceneMounting = false;
+      }
     } else if (!sceneMounted) {
       status.textContent = graphStatus(interaction.state);
       window.__SEEIN_READY__ = true;
@@ -1406,6 +1551,12 @@ async function runGuidedViewer(projectId: string): Promise<void> {
   wireStop(projectId, refresh);
   await refresh();
   startPolling();
+}
+
+function setGuidedSceneAvailable(available: boolean): void {
+  const empty = String(!available);
+  workflowPanel.dataset.sceneEmpty = empty;
+  viewport.dataset.sceneEmpty = empty;
 }
 
 // Set while the guided viewer is mounted so a rewind can wake the poll loop back up.

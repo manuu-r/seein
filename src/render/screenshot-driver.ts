@@ -1,8 +1,17 @@
 import fs from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statfsSync } from "node:fs";
 import path from "node:path";
 import { chromium, type Browser, type Frame, type Page } from "playwright";
 import type { Config } from "../config.js";
+
+const RENDER_WALL_CLOCK_TIMEOUT_MS = 60_000;
+const NAVIGATION_WALL_CLOCK_TIMEOUT_MS = 30_000;
+const FRAME_DIAGNOSTIC_TIMEOUT_MS = 2_500;
+const COMPOSITOR_SETTLE_TIMEOUT_MS = 5_000;
+const SUCCESS_SCREENSHOT_TIMEOUT_MS = 10_000;
+const FAILURE_SCREENSHOT_TIMEOUT_MS = 5_000;
+const BROWSER_SHUTDOWN_TIMEOUT_MS = 5_000;
+const MINIMUM_CHROMIUM_SHM_BYTES = 512 * 1024 * 1024;
 
 export interface RenderReadinessState {
   assetsLoaded?: boolean;
@@ -115,15 +124,23 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
         });
       });
 
-      await nextPage.goto(viewerUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await withWallClockDeadline(
+        nextPage.goto(viewerUrl, { waitUntil: "domcontentloaded", timeout: NAVIGATION_WALL_CLOCK_TIMEOUT_MS }),
+        NAVIGATION_WALL_CLOCK_TIMEOUT_MS,
+        "Viewer navigation timed out",
+      );
       phase = "outer-readiness";
-      await nextPage.waitForFunction(
-        () => {
-          const viewer = window as unknown as { __SEEIN_READY__?: boolean; __SEEIN_RENDER_FAILURE__?: string };
-          return viewer.__SEEIN_READY__ === true || Boolean(viewer.__SEEIN_RENDER_FAILURE__);
-        },
-        undefined,
-        { timeout: 60_000, polling: 100 },
+      await withWallClockDeadline(
+        nextPage.waitForFunction(
+          () => {
+            const viewer = window as unknown as { __SEEIN_READY__?: boolean; __SEEIN_RENDER_FAILURE__?: string };
+            return viewer.__SEEIN_READY__ === true || Boolean(viewer.__SEEIN_RENDER_FAILURE__);
+          },
+          undefined,
+          { timeout: RENDER_WALL_CLOCK_TIMEOUT_MS, polling: 100 },
+        ),
+        RENDER_WALL_CLOCK_TIMEOUT_MS,
+        "Outer viewer did not reach render readiness",
       );
       const initial = await readFrameSnapshot(nextPage.mainFrame());
       if (initial.renderState?.failure) throw new Error(initial.renderState.failure);
@@ -132,27 +149,36 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
         if (readinessError) throw new Error(readinessError);
       }
       phase = "frame-stability";
-      await nextPage.waitForFunction(
-        () => {
-          const viewer = window as unknown as {
-            __SEEIN_RENDER_FAILURE__?: string;
-            __SEEIN_RENDER_STATE__?: RenderReadinessState;
-          };
-          const state = viewer.__SEEIN_RENDER_STATE__;
-          return Boolean(viewer.__SEEIN_RENDER_FAILURE__) || (
-            state?.assetsLoaded === true &&
-            state.moduleCompiled === true &&
-            state.cameraSettled === true &&
-            (state.stableFrames ?? 0) >= 2
-          );
-        },
-        undefined,
-        { timeout: 60_000, polling: 100 },
+      await withWallClockDeadline(
+        nextPage.waitForFunction(
+          () => {
+            const viewer = window as unknown as {
+              __SEEIN_RENDER_FAILURE__?: string;
+              __SEEIN_RENDER_STATE__?: RenderReadinessState;
+            };
+            const state = viewer.__SEEIN_RENDER_STATE__;
+            return Boolean(viewer.__SEEIN_RENDER_FAILURE__) || (
+              state?.assetsLoaded === true &&
+              state.moduleCompiled === true &&
+              state.cameraSettled === true &&
+              (state.stableFrames ?? 0) >= 2
+            );
+          },
+          undefined,
+          { timeout: RENDER_WALL_CLOCK_TIMEOUT_MS, polling: 100 },
+        ),
+        RENDER_WALL_CLOCK_TIMEOUT_MS,
+        "Generated module did not reach frame stability",
       );
       const settled = await readFrameSnapshot(nextPage.mainFrame());
       if (settled.renderState?.failure) throw new Error(settled.renderState.failure);
       phase = "screenshot";
-      await nextPage.screenshot({ path: outputPath, type: "png" });
+      await settleRendererForScreenshot(nextPage);
+      await withWallClockDeadline(
+        nextPage.screenshot({ path: outputPath, type: "png", animations: "disabled" }),
+        SUCCESS_SCREENSHOT_TIMEOUT_MS,
+        "Renderer screenshot timed out",
+      );
       return {
         path: outputPath,
         browserErrors: boundedMessages([...consoleErrors, ...settled.errors]),
@@ -182,7 +208,13 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
         error,
       );
     } finally {
-      await page?.close().catch(() => undefined);
+      if (page) {
+        try {
+          await withWallClockDeadline(page.close(), BROWSER_SHUTDOWN_TIMEOUT_MS, "Renderer page did not close");
+        } catch {
+          await this.discardBrowser();
+        }
+      }
     }
   }
 
@@ -196,6 +228,7 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
       const launch = this.launchBrowser({
         headless: this.config.PLAYWRIGHT_HEADLESS,
         ...(executablePath ? { executablePath } : {}),
+        ...(hasLargeDevShm() ? { ignoreDefaultArgs: ["--disable-dev-shm-usage"] } : {}),
       });
       this.browserPromise = launch;
       void launch.catch(() => {
@@ -215,8 +248,34 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
     this.browserPromise = null;
     if (!pending) return;
     const browser = await pending.catch(() => null);
-    await browser?.close().catch(() => undefined);
+    if (browser) {
+      await withWallClockDeadline(browser.close(), BROWSER_SHUTDOWN_TIMEOUT_MS, "Chromium did not close")
+        .catch(() => undefined);
+    }
   }
+}
+
+async function settleRendererForScreenshot(page: Page): Promise<void> {
+  await withWallClockDeadline(
+    page.evaluate(async () => {
+      const childFontSets = [...document.querySelectorAll("iframe")].flatMap((frame) => {
+        try {
+          return frame.contentDocument ? [frame.contentDocument.fonts.ready] : [];
+        } catch {
+          return [];
+        }
+      });
+      await Promise.all([document.fonts.ready, ...childFontSets]);
+      // Readiness is reported from inside R3F's frame callback. Let that frame
+      // commit and give Chromium's compositor two additional paint turns so a
+      // screenshot cannot catch partially-rasterized text/backdrop layers.
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      });
+    }),
+    COMPOSITOR_SETTLE_TIMEOUT_MS,
+    "Renderer compositor did not settle",
+  );
 }
 
 async function collectRendererDiagnostics(
@@ -264,7 +323,7 @@ function startupDiagnostics(
 
 async function readFrameSnapshot(frame: Frame): Promise<RenderFrameDiagnostics> {
   try {
-    const snapshot = await frame.evaluate(() => {
+    const snapshot = await withWallClockDeadline(frame.evaluate(() => {
       type RenderState = {
         assetsLoaded?: boolean;
         moduleCompiled?: boolean;
@@ -309,7 +368,7 @@ async function readFrameSnapshot(frame: Frame): Promise<RenderFrameDiagnostics> 
         canvasCount: document.querySelectorAll("canvas").length,
         ...(canvas ? { canvas: { width: canvas.width, height: canvas.height } } : {}),
       };
-    });
+    }), FRAME_DIAGNOSTIC_TIMEOUT_MS, "Frame diagnostic timed out");
     return {
       url: boundedText(frame.url(), 2_000),
       isMainFrame: frame.parentFrame() === null,
@@ -336,7 +395,11 @@ async function saveFailureScreenshot(page: Page, outputPath: string): Promise<st
     ? `${outputPath.slice(0, -4)}.diagnostic.png`
     : `${outputPath}.diagnostic.png`;
   try {
-    await page.screenshot({ path: failurePath, type: "png" });
+    await withWallClockDeadline(
+      page.screenshot({ path: failurePath, type: "png" }),
+      FAILURE_SCREENSHOT_TIMEOUT_MS,
+      "Failure screenshot timed out",
+    );
     return failurePath;
   } catch {
     return undefined;
@@ -363,6 +426,29 @@ function boundedMessages(values: string[]): string[] {
 
 function boundedText(value: string, maximum: number): string {
   return value.length <= maximum ? value : `${value.slice(0, maximum - 1)}…`;
+}
+
+export function hasLargeDevShm(directory = "/dev/shm"): boolean {
+  try {
+    const stats = statfsSync(directory);
+    return stats.bavail * stats.bsize >= MINIMUM_CHROMIUM_SHM_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+export async function withWallClockDeadline<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${label} within ${Math.ceil(timeoutMs / 1_000)} seconds`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 export function summarizeRendererDiagnostics(diagnostics: RendererDiagnostics): string {

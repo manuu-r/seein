@@ -4,10 +4,12 @@ import path from "node:path";
 import { chromium, type Browser } from "playwright";
 import { describe, expect, it } from "vitest";
 import {
+  hasLargeDevShm,
   isRendererInfrastructureFailure,
   PlaywrightScreenshotDriver,
   ScreenshotCaptureError,
   summarizeRendererDiagnostics,
+  withWallClockDeadline,
   type RendererDiagnostics,
 } from "../src/render/screenshot-driver.js";
 import { canRepairRendererFailure } from "../src/workflow/orchestrator.js";
@@ -31,6 +33,16 @@ class NewPageFailureDriver extends PlaywrightScreenshotDriver {
 }
 
 describe("renderer diagnostics", () => {
+  it("enforces a wall-clock deadline even if a browser operation never settles", async () => {
+    const never = new Promise<never>(() => undefined);
+    await expect(withWallClockDeadline(never, 10, "Browser operation stalled"))
+      .rejects.toThrow("Browser operation stalled within 1 seconds");
+  });
+
+  it("falls back to Chromium's safe shared-memory default when /dev/shm is unavailable", () => {
+    expect(hasLargeDevShm(path.join(os.tmpdir(), "seein-missing-dev-shm"))).toBe(false);
+  });
+
   it("summarizes the child module's real readiness state for a repair decision", () => {
     const summary = summarizeRendererDiagnostics({
       capturedAt: "2026-08-31T00:00:00.000Z",

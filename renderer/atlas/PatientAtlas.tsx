@@ -5,6 +5,7 @@ import { Canvas, useFrame, useLoader, useThree } from "@react-three/fiber";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import * as THREE from "three";
+import { acceleratedRaycast, CENTER, MeshBVH } from "three-mesh-bvh";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { OperatingRoom, OPERATING_ROOM_BOUNDS } from "./OperatingRoom";
@@ -362,14 +363,31 @@ const DRAPE_CAUDAL_Y = -7.2;
 const DRAPE_CRANIAL_Y = 0.18;
 const MATTRESS_TOP_Z = -2.57;
 
-type PatientDrapeData = {
+export type PatientDrapeData = {
   geometry: THREE.BufferGeometry;
   surfacePoint: (u: number, y: number, clearance?: number) => Point;
 };
 
 const PATIENT_DRAPE_CACHE = new WeakMap<THREE.Group, PatientDrapeData | null>();
+const PATIENT_RAYCAST_BVH_CACHE = new WeakMap<THREE.BufferGeometry, MeshBVH>();
 
-function makePatientContouredDrape(source: THREE.Group) {
+function enableAcceleratedPatientRaycast(mesh: THREE.Mesh<THREE.BufferGeometry>): void {
+  const geometry = mesh.geometry as THREE.BufferGeometry & { boundsTree?: MeshBVH };
+  let boundsTree = PATIENT_RAYCAST_BVH_CACHE.get(geometry);
+  if (!boundsTree) {
+    // indirect keeps the source OBJ index order byte-for-byte intact. The BVH
+    // changes only ray-query acceleration, never rendered vertex placement.
+    boundsTree = new MeshBVH(geometry, { strategy: CENTER, indirect: true });
+    PATIENT_RAYCAST_BVH_CACHE.set(geometry, boundsTree);
+  }
+  geometry.boundsTree = boundsTree;
+  mesh.raycast = acceleratedRaycast;
+}
+
+export function makePatientContouredDrape(
+  source: THREE.Group,
+  { useBvh = true }: { useBvh?: boolean } = {},
+) {
   const body = source.getObjectByName("body") as THREE.Mesh | undefined;
   if (!body || !(body.geometry instanceof THREE.BufferGeometry)) return null;
 
@@ -389,6 +407,7 @@ function makePatientContouredDrape(source: THREE.Group) {
   );
   patientMesh.scale.set(patientScale * 1.32, patientScale, patientScale);
   patientMesh.updateMatrixWorld(true);
+  if (useBvh) enableAcceleratedPatientRaycast(patientMesh);
 
   const xSegments = 44;
   // Holds the previous longitudinal density over the slightly longer run.
@@ -398,6 +417,7 @@ function makePatientContouredDrape(source: THREE.Group) {
   const surfaceRows: number[][] = [];
   const rowExtents: Array<{ min: number; max: number } | null> = [];
   const raycaster = new THREE.Raycaster();
+  if (useBvh) (raycaster as THREE.Raycaster & { firstHitOnly?: boolean }).firstHitOnly = true;
   const rayDirection = new THREE.Vector3(0, 0, -1);
   const vertices: number[] = [];
   const uvs: number[] = [];
