@@ -13,6 +13,7 @@ import {
   SurgicalModuleSourceSchema,
   type CompiledSurgicalModule,
   type SurgicalModuleRecoveryContext,
+  type SurgicalModuleRendererEvidence,
   type SurgicalModuleSource,
 } from "../atlas/module-contracts.js";
 import type { Config } from "../config.js";
@@ -32,6 +33,12 @@ import type {
 } from "../contracts.js";
 import { InspectionSchema, QaCoverageSchema, QualitySupervisorStateSchema, ReferenceCandidateSchema, SceneManifestSchema } from "../contracts.js";
 import type { PlannerReferenceImage, WorkflowAI } from "../ai/workflow-ai.js";
+import {
+  GeminiTokenBudgetExceededError,
+  type GeminiTokenUsage,
+  type GeminiUsageScope,
+  withGeminiUsageScope,
+} from "../ai/gemini-usage.js";
 import type { ContextStore } from "../context/context-store.js";
 import { hashObject, sha256 } from "../lib/hash.js";
 import { normalizePrompt } from "../lib/strings.js";
@@ -40,7 +47,13 @@ import {
   safeLogFields,
   type DiagnosticLogger,
 } from "../lib/diagnostics.js";
-import type { ScreenshotDriver } from "../render/screenshot-driver.js";
+import {
+  isRendererInfrastructureFailure,
+  ScreenshotCaptureError,
+  summarizeRendererDiagnostics,
+  type RendererDiagnostics,
+  type ScreenshotDriver,
+} from "../render/screenshot-driver.js";
 import type { ReferenceCollector } from "../research/reference-collector.js";
 import { objectImageQuery, type ReferenceSearchDriver } from "../research/reference-search.js";
 import type { ArtifactStore, StoredArtifact } from "../storage/artifact-store.js";
@@ -101,6 +114,8 @@ interface ProviderOperation<T> {
   action: string;
   detail?: Record<string, unknown>;
   resultDetail?: (result: T) => Record<string, unknown>;
+  maxAttempts?: number;
+  shouldRetry?: (error: unknown) => boolean;
 }
 
 function aiDestination(_provider: string): string {
@@ -113,7 +128,64 @@ const CachedRenderSchema = z.object({
   browserErrors: z.array(z.string()),
 });
 
-const RENDERER_CACHE_IDENTITY = "three-viewer:v1";
+const GeminiProjectUsageSchema = z.object({
+  schemaVersion: z.literal("1.0"),
+  projectId: z.string().min(1),
+  limitTokens: z.number().int().positive(),
+  totalTokens: z.number().int().nonnegative(),
+  promptTokens: z.number().int().nonnegative(),
+  candidateTokens: z.number().int().nonnegative(),
+  thoughtsTokens: z.number().int().nonnegative(),
+  toolUsePromptTokens: z.number().int().nonnegative(),
+  responses: z.number().int().nonnegative(),
+  unreportedResponses: z.number().int().nonnegative(),
+  updatedAt: z.iso.datetime(),
+});
+type GeminiProjectUsage = z.infer<typeof GeminiProjectUsageSchema>;
+
+/** Serializes all successful Gemini usage updates for one project. */
+class ProjectGeminiTokenLedger implements GeminiUsageScope {
+  private pending = Promise.resolve();
+
+  constructor(
+    private usage: GeminiProjectUsage,
+    private readonly persist: (usage: GeminiProjectUsage) => Promise<void>,
+  ) {}
+
+  async beforeRequest(): Promise<void> {
+    await this.pending;
+    if (this.usage.totalTokens >= this.usage.limitTokens) {
+      throw new GeminiTokenBudgetExceededError(this.usage.projectId, this.usage.totalTokens, this.usage.limitTokens);
+    }
+  }
+
+  async recordResponse(response: GeminiTokenUsage): Promise<void> {
+    this.usage = GeminiProjectUsageSchema.parse({
+      ...this.usage,
+      totalTokens: this.usage.totalTokens + response.totalTokens,
+      promptTokens: this.usage.promptTokens + response.promptTokens,
+      candidateTokens: this.usage.candidateTokens + response.candidateTokens,
+      thoughtsTokens: this.usage.thoughtsTokens + response.thoughtsTokens,
+      toolUsePromptTokens: this.usage.toolUsePromptTokens + response.toolUsePromptTokens,
+      responses: this.usage.responses + 1,
+      unreportedResponses: this.usage.unreportedResponses + (response.reported ? 0 : 1),
+      updatedAt: new Date().toISOString(),
+    });
+    this.pending = this.pending.then(() => this.persist(this.usage));
+    await this.pending;
+  }
+
+  detail(): Record<string, number> {
+    return {
+      geminiTokensUsed: this.usage.totalTokens,
+      geminiTokensLimit: this.usage.limitTokens,
+      geminiTokenResponses: this.usage.responses,
+      geminiUnreportedResponses: this.usage.unreportedResponses,
+    };
+  }
+}
+
+const RENDERER_CACHE_IDENTITY = "three-viewer:v2-diagnostics";
 
 type ReferenceCandidate = z.infer<typeof ReferenceCandidateSchema>;
 
@@ -210,6 +282,7 @@ export class Orchestrator {
   private readonly interactionLocks = new Set<string>();
   private readonly sequences = new Map<string, number>();
   private readonly bypassCache = new Set<string>();
+  private readonly geminiUsageLedgers = new Map<string, Promise<ProjectGeminiTokenLedger>>();
   private operationSequence = 0;
   private readonly atlasCompiler: SurgicalModuleCompiler;
   private readonly atlasLibrary: SurgicalAtlasLibrary;
@@ -392,6 +465,7 @@ export class Orchestrator {
     await this.projects.delete(project);
     this.sequences.delete(projectId);
     this.bypassCache.delete(projectId);
+    this.geminiUsageLedgers.delete(projectId);
   }
 
   async getGraphState(projectId: string): Promise<WorkflowGraphState | null> {
@@ -406,6 +480,51 @@ export class Orchestrator {
       return state;
     } catch {
       return null;
+    }
+  }
+
+  private async getGeminiUsageLedger(project: ProjectRecord): Promise<ProjectGeminiTokenLedger> {
+    const existing = this.geminiUsageLedgers.get(project.projectId);
+    if (existing) return existing;
+    const load = (async () => {
+      const relativeRoot = this.projects.relativeRoot(project);
+      const key = `${relativeRoot}/quality/gemini-usage.json`;
+      let previous: GeminiProjectUsage | null = null;
+      try {
+        previous = GeminiProjectUsageSchema.parse(
+          JSON.parse(await fs.readFile(this.artifacts.absolutePath(key), "utf8")),
+        );
+      } catch {
+        // Missing/corrupt metering is reset to a conservative fresh ledger rather
+        // than silently treating an entire project as unbounded.
+      }
+      const usage = GeminiProjectUsageSchema.parse({
+        schemaVersion: "1.0",
+        projectId: project.projectId,
+        limitTokens: this.config.WORKFLOW_MAX_GEMINI_TOKENS_PER_PROJECT,
+        totalTokens: previous?.totalTokens ?? 0,
+        promptTokens: previous?.promptTokens ?? 0,
+        candidateTokens: previous?.candidateTokens ?? 0,
+        thoughtsTokens: previous?.thoughtsTokens ?? 0,
+        toolUsePromptTokens: previous?.toolUsePromptTokens ?? 0,
+        responses: previous?.responses ?? 0,
+        unreportedResponses: previous?.unreportedResponses ?? 0,
+        updatedAt: new Date().toISOString(),
+      });
+      await this.artifacts.writeJson(key, usage);
+      return new ProjectGeminiTokenLedger(
+        usage,
+        async (next) => {
+          await this.artifacts.writeJson(key, next);
+        },
+      );
+    })();
+    this.geminiUsageLedgers.set(project.projectId, load);
+    try {
+      return await load;
+    } catch (error) {
+      this.geminiUsageLedgers.delete(project.projectId);
+      throw error;
     }
   }
 
@@ -1361,15 +1480,111 @@ export class Orchestrator {
       });
       await this.persistQualitySupervisor(project, supervisor);
 
+      const recoverRendererFailure = async (error: unknown): Promise<boolean> => {
+        const diagnostics = extractRendererDiagnostics(error);
+        if (!diagnostics || !canRepairRendererFailure(diagnostics)) return false;
+        const fingerprint = rendererFailureFingerprint(diagnostics);
+        const repeated = supervisor.recentRenderFailureFingerprints.includes(fingerprint);
+        const budgetStatus = qualitySupervisorBudgetStatus(supervisor, this.config);
+        if (
+          repeated
+          || supervisor.renderRecoveries >= this.config.WORKFLOW_MAX_RENDER_RECOVERIES
+          || budgetStatus !== "running"
+        ) {
+          await this.emit(project, "refining", "info", {
+            phase: "renderer-recovery-skipped",
+            revision: currentRevision,
+            targetId: currentTarget.id,
+            repeatedDiagnostic: repeated,
+            renderRecoveries: supervisor.renderRecoveries,
+            maxRenderRecoveries: this.config.WORKFLOW_MAX_RENDER_RECOVERIES,
+            budgetStatus,
+            rendererDiagnostics: summarizeRendererDiagnostics(diagnostics),
+          });
+          return false;
+        }
+
+        const failedTarget = currentTarget;
+        const rendererEvidence = rendererRecoveryEvidence(diagnostics);
+        project = await this.stage(project, "refining");
+        currentRevision += 1;
+        const recovery: SurgicalModuleRecoveryContext = {
+          attempt: refinements + 1,
+          failedViewId: failedTarget.viewId ?? failedTarget.id,
+          failedStepId: failedTarget.stateId,
+          passedTargetIds: [...passedTargetIds],
+          issue: "The generated module compiled but did not reach a stable browser render.",
+          evidence: rendererEvidence.summary,
+          failedCriteria: [
+            "The generated React Three Fiber module must mount, report a settled camera, and render at least two stable frames in Chromium.",
+          ],
+          previous: source,
+          rendererEvidence,
+        };
+        built = await generateAndCompile(currentRevision, recovery);
+        source = built.source;
+        compiled = built.compiled;
+        currentScene = surgicalModuleManifest(project.projectId, compiled);
+        currentManifest = await this.storeScene(project, currentScene);
+        currentSpatial = emptyModuleSpatialReport(currentRevision);
+        targets = buildQaTargets(currentScene, this.config.WORKFLOW_MAX_QA_TARGETS);
+        prioritizeRecoveryTarget(targets, failedTarget);
+        passedTargetIds.clear();
+        targetIndex = 0;
+        currentTarget = targets[0]!;
+        refinements += 1;
+        supervisor = QualitySupervisorStateSchema.parse({
+          ...supervisor,
+          attempt: supervisor.attempt + 1,
+          refinements: supervisor.refinements + 1,
+          replans: supervisor.replans + 1,
+          renderRecoveries: supervisor.renderRecoveries + 1,
+          recentRenderFailureFingerprints: [...supervisor.recentRenderFailureFingerprints, fingerprint].slice(-12),
+          currentRevision,
+          currentTargetId: currentTarget.id,
+          passedTargetIds: [],
+          lastRecoveryReason: `Renderer-evidence source repair: ${rendererEvidence.summary}`.slice(0, 2_000),
+          updatedAt: new Date().toISOString(),
+        });
+        await Promise.all([
+          this.artifacts.writeJson(`${relativeRoot}/module/definition.json`, source.definition),
+          this.artifacts.writeJson(`${relativeRoot}/module/compiled.json`, compiled),
+          this.artifacts.writeJson(`${relativeRoot}/module/definition-revision-${padRevision(currentRevision)}.json`, source.definition),
+          this.artifacts.writeJson(`${relativeRoot}/qa/spatial-revision-${padRevision(currentRevision)}.json`, currentSpatial),
+          this.context.storeSpatial(project.projectId, currentRevision, currentSpatial),
+          this.persistQualitySupervisor(project, supervisor),
+          this.emit(project, "refining", "completed", {
+            revision: currentRevision,
+            repair: "renderer-evidence-source-regeneration",
+            targetId: failedTarget.id,
+            renderRecoveries: supervisor.renderRecoveries,
+            rendererDiagnostics: rendererEvidence.summary,
+            structures: source.definition.structures.length,
+            steps: source.definition.steps.length,
+            resetTargets: targets.length,
+          }),
+        ]);
+        return true;
+      };
+
+      type QaRenderResult = {
+        artifact: StoredArtifact;
+        capture: { path: string; browserErrors: string[]; diagnostics?: RendererDiagnostics };
+        cacheHit: boolean;
+      };
+      const renderCurrentTarget = async (kind: "initial" | "final"): Promise<QaRenderResult> => {
+        for (;;) {
+          try {
+            return await this.renderQaTarget(project, currentScene, currentManifest, currentTarget, relativeRoot, kind);
+          } catch (error) {
+            if (!await recoverRendererFailure(error)) throw error;
+            project = await this.stage(project, kind === "initial" ? "rendering_initial" : "rendering_final");
+          }
+        }
+      };
+
       project = await this.stage(project, "rendering_initial");
-      let currentRender = await this.renderQaTarget(
-        project,
-        currentScene,
-        currentManifest,
-        currentTarget,
-        relativeRoot,
-        "initial",
-      );
+      let currentRender = await renderCurrentTarget("initial");
       const initialRender = currentRender.artifact;
       await this.emit(project, "rendering_initial", "completed", {
         targetId: currentTarget.id,
@@ -1477,7 +1692,7 @@ export class Orchestrator {
           });
           await this.persistQualitySupervisor(project, supervisor);
           project = await this.stage(project, "rendering_final");
-          currentRender = await this.renderQaTarget(project, currentScene, currentManifest, currentTarget, relativeRoot, "final");
+          currentRender = await renderCurrentTarget("final");
           await this.emit(project, "rendering_final", "completed", {
             revision: currentRevision,
             targetId: currentTarget.id,
@@ -1547,7 +1762,7 @@ export class Orchestrator {
           }),
         ]);
         project = await this.stage(project, "rendering_final");
-        currentRender = await this.renderQaTarget(project, currentScene, currentManifest, currentTarget, relativeRoot, "final");
+        currentRender = await renderCurrentTarget("final");
         await this.emit(project, "rendering_final", "completed", {
           revision: currentRevision,
           targetId: currentTarget.id,
@@ -1672,6 +1887,8 @@ export class Orchestrator {
       targetedResearchRounds: 0,
       replans: 0,
       logicalAiCalls: 0,
+      renderRecoveries: existing?.renderRecoveries ?? 0,
+      recentRenderFailureFingerprints: existing?.recentRenderFailureFingerprints ?? [],
       currentRevision: existing?.currentRevision ?? 1,
       passedTargetIds: [],
       bestScores: existing?.bestScores ?? {
@@ -1719,8 +1936,12 @@ export class Orchestrator {
   ): Promise<T> {
     const operationId = `${project.runId.slice(0, 8)}-${++this.operationSequence}`;
     const operationStartedAt = Date.now();
+    const maxAttempts = call.maxAttempts ?? this.config.WORKFLOW_PROVIDER_RETRIES;
+    const geminiLedger = call.destination.includes("Google Gemini API")
+      ? await this.getGeminiUsageLedger(project)
+      : undefined;
     let lastError: unknown;
-    for (let attempt = 1; attempt <= this.config.WORKFLOW_PROVIDER_RETRIES; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const attemptStartedAt = Date.now();
       await this.emit(
         project,
@@ -1733,7 +1954,7 @@ export class Orchestrator {
           destination: call.destination,
           action: call.action,
           attempt,
-          maxAttempts: this.config.WORKFLOW_PROVIDER_RETRIES,
+          maxAttempts,
           ...call.detail,
         },
         {
@@ -1743,7 +1964,7 @@ export class Orchestrator {
         },
       );
       try {
-        const result = await operation();
+        const result = await (geminiLedger ? withGeminiUsageScope(geminiLedger, operation) : operation());
         const resultDetail = call.resultDetail?.(result) ?? {};
         await this.emit(
           project,
@@ -1754,13 +1975,14 @@ export class Orchestrator {
             label: call.label,
             provider: call.provider,
             destination: call.destination,
-            action: call.action,
-            attempt,
-            maxAttempts: this.config.WORKFLOW_PROVIDER_RETRIES,
+          action: call.action,
+          attempt,
+          maxAttempts,
             durationMs: Date.now() - attemptStartedAt,
             totalDurationMs: Date.now() - operationStartedAt,
             ...call.detail,
             ...resultDetail,
+            ...(geminiLedger ? geminiLedger.detail() : {}),
           },
           {
             kind: "operation",
@@ -1771,7 +1993,11 @@ export class Orchestrator {
         return result;
       } catch (error) {
         lastError = error;
-        const failed = attempt >= this.config.WORKFLOW_PROVIDER_RETRIES;
+        const retryAllowed = !(
+          error instanceof GeminiTokenBudgetExceededError
+          || (call.shouldRetry ? !call.shouldRetry(error) : false)
+        );
+        const failed = attempt >= maxAttempts || !retryAllowed;
         const delay = Math.min(this.config.WORKFLOW_RETRY_BASE_MS * 2 ** (attempt - 1), 30_000);
         await this.emit(
           project,
@@ -1782,14 +2008,16 @@ export class Orchestrator {
             label: call.label,
             provider: call.provider,
             destination: call.destination,
-            action: call.action,
-            attempt,
-            maxAttempts: this.config.WORKFLOW_PROVIDER_RETRIES,
+          action: call.action,
+          attempt,
+          maxAttempts,
             durationMs: Date.now() - attemptStartedAt,
             totalDurationMs: Date.now() - operationStartedAt,
             ...(failed ? {} : { retryInMs: delay }),
             ...describeError(error),
             ...call.detail,
+            ...(geminiLedger ? geminiLedger.detail() : {}),
+            ...(!retryAllowed ? { retrySuppressed: true } : {}),
           },
           {
             kind: "operation",
@@ -1804,7 +2032,8 @@ export class Orchestrator {
       }
     }
     const message = lastError instanceof Error ? lastError.message : String(lastError);
-    throw new Error(`${call.label} failed after ${this.config.WORKFLOW_PROVIDER_RETRIES} attempts: ${message}`, {
+    if (lastError instanceof ScreenshotCaptureError || lastError instanceof GeminiTokenBudgetExceededError) throw lastError;
+    throw new Error(`${call.label} failed after ${maxAttempts} attempts: ${message}`, {
       cause: lastError,
     });
   }
@@ -1828,7 +2057,7 @@ export class Orchestrator {
     target?: QaTarget,
   ): Promise<{
     artifact: StoredArtifact;
-    capture: { path: string; browserErrors: string[] };
+    capture: { path: string; browserErrors: string[]; diagnostics?: RendererDiagnostics };
     cacheHit: boolean;
   }> {
     const cacheKey = hashObject({
@@ -1843,9 +2072,12 @@ export class Orchestrator {
       cached.success &&
       cached.data.browserErrors.length === 0 &&
       (await validFile(cached.data.path, cached.data.sha256));
-    const capture = cacheHit
-      ? { path: outputPath, browserErrors: cached.data.browserErrors }
-      : await this.withProviderRetries(
+    let capture: { path: string; browserErrors: string[]; diagnostics?: RendererDiagnostics };
+    if (cacheHit) {
+      capture = { path: outputPath, browserErrors: cached.data.browserErrors };
+    } else {
+      try {
+        capture = await this.withProviderRetries(
           project,
           kind === "initial" ? "rendering_initial" : "rendering_final",
           {
@@ -1863,10 +2095,36 @@ export class Orchestrator {
             resultDetail: (result) => ({
               capturedPath: result.path,
               browserErrors: result.browserErrors,
+              ...(result.diagnostics ? { rendererDiagnostics: summarizeRendererDiagnostics(result.diagnostics) } : {}),
             }),
+            // A source/runtime error is captured once with its actual browser
+            // state. Only a pre-viewer transport failure gets one retry.
+            maxAttempts: 2,
+            shouldRetry: (error) => !(error instanceof ScreenshotCaptureError) || error.retryable,
           },
           () => this.screenshots.capture(this.renderViewerUrl(manifest.url, target), outputPath),
         );
+      } catch (error) {
+        const diagnostics = extractRendererDiagnostics(error);
+        if (diagnostics) {
+          const diagnosticKey = artifactKey.replace(/\.png$/i, ".diagnostic.json");
+          const diagnosticArtifact = await this.artifacts.writeJson(diagnosticKey, diagnostics);
+          const failureScreenshotKey = artifactKey.replace(/\.png$/i, ".diagnostic.png");
+          const failureScreenshot = diagnostics.failureScreenshotPath
+            ? await artifactFromExisting(diagnostics.failureScreenshotPath, failureScreenshotKey, this.artifacts).catch(() => null)
+            : null;
+          await this.emit(project, kind === "initial" ? "rendering_initial" : "rendering_final", "info", {
+            phase: "captured-diagnostics",
+            revision: scene.revision,
+            targetId: target?.id ?? null,
+            diagnosticUrl: diagnosticArtifact.url,
+            failureScreenshotUrl: failureScreenshot?.url ?? null,
+            rendererDiagnostics: summarizeRendererDiagnostics(diagnostics),
+          });
+        }
+        throw error;
+      }
+    }
     const artifact = await artifactFromExisting(
       cacheHit ? cached.data.path : capture.path,
       artifactKey,
@@ -1998,6 +2256,112 @@ async function validFile(filePath: string, expectedSha256: string): Promise<bool
     return buffer.length > 20 && sha256(buffer) === expectedSha256;
   } catch {
     return false;
+  }
+}
+
+function extractRendererDiagnostics(error: unknown): RendererDiagnostics | null {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof ScreenshotCaptureError) return current.diagnostics;
+    const candidate = current as { diagnostics?: unknown; cause?: unknown };
+    if (isRendererDiagnostics(candidate.diagnostics)) return candidate.diagnostics;
+    current = candidate.cause;
+  }
+  return null;
+}
+
+function isRendererDiagnostics(value: unknown): value is RendererDiagnostics {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<RendererDiagnostics>;
+  return typeof candidate.viewerUrl === "string"
+    && typeof candidate.phase === "string"
+    && Array.isArray(candidate.frames)
+    && Array.isArray(candidate.network);
+}
+
+export function canRepairRendererFailure(diagnostics: RendererDiagnostics): boolean {
+  // A Chromium launch/new-page failure has no evidence from the generated
+  // module. Retrying the renderer is useful; sending it to Gemini is not.
+  if (isRendererInfrastructureFailure(diagnostics)) return false;
+  const moduleFrame = diagnostics.frames.find((frame) => !frame.isMainFrame && frame.url.includes("/module/"));
+  if (!moduleFrame) return false;
+  // Network/artifact failures are deployment, IAP, or renderer conditions.
+  // The generated source cannot correct them.
+  const artifactTransportFailure = diagnostics.network.some((entry) =>
+    (entry.kind === "request-failed" || (typeof entry.status === "number" && entry.status >= 400))
+    && isModuleArtifactUrl(entry.url),
+  );
+  if (artifactTransportFailure) return false;
+
+  // A loaded iframe by itself is not evidence that the generated source is at
+  // fault. Only the explicit runtime failure signal emitted by the generated
+  // module host can start a bounded Gemini source repair. In particular, a
+  // stalled assetsLoaded/stableFrames readiness state preserves the source and
+  // leaves diagnostics for renderer investigation.
+  return typeof moduleFrame.renderState?.failure === "string"
+    && moduleFrame.renderState.failure.trim().length > 0;
+}
+
+function isModuleArtifactUrl(url: string): boolean {
+  return url.includes("/module/") || url.includes("/artifacts/");
+}
+
+function rendererFailureFingerprint(diagnostics: RendererDiagnostics): string {
+  const module = diagnostics.frames.find((frame) => !frame.isMainFrame && frame.url.includes("/module/"));
+  return hashObject({
+    phase: diagnostics.phase,
+    browserErrors: diagnostics.browserErrors,
+    module: module
+      ? {
+          errors: module.errors,
+          state: module.renderState,
+          rootChildCount: module.rootChildCount,
+          canvasCount: module.canvasCount,
+        }
+      : null,
+    failedRequests: diagnostics.network.filter((entry) => entry.status === undefined || entry.status >= 400),
+  });
+}
+
+function rendererRecoveryEvidence(diagnostics: RendererDiagnostics): SurgicalModuleRendererEvidence {
+  const module = diagnostics.frames.find((frame) => !frame.isMainFrame && frame.url.includes("/module/"));
+  return {
+    phase: diagnostics.phase,
+    summary: summarizeRendererDiagnostics(diagnostics),
+    browserErrors: diagnostics.browserErrors.slice(-12),
+    ...(module
+      ? {
+          moduleFrame: {
+            url: module.url,
+            errors: module.errors.slice(-12),
+            ...(module.renderState ? { renderState: { ...module.renderState } } : {}),
+            ...(module.documentReadyState ? { documentReadyState: module.documentReadyState } : {}),
+            ...(typeof module.rootChildCount === "number" ? { rootChildCount: module.rootChildCount } : {}),
+            ...(typeof module.canvasCount === "number" ? { canvasCount: module.canvasCount } : {}),
+          },
+        }
+      : {}),
+    failedRequests: diagnostics.network
+      .filter((entry) => entry.status === undefined || entry.status >= 400)
+      .slice(-12)
+      .map((entry) => ({
+        url: entry.url,
+        ...(typeof entry.status === "number" ? { status: entry.status } : {}),
+        ...(entry.failure ? { failure: entry.failure } : {}),
+      })),
+  };
+}
+
+function prioritizeRecoveryTarget(targets: QaTarget[], failedTarget: QaTarget): void {
+  const recoveryTargetIndex = targets.findIndex((target) =>
+    target.id === failedTarget.id
+    || (target.viewId === failedTarget.viewId && target.stateId === failedTarget.stateId),
+  );
+  if (recoveryTargetIndex > 0) {
+    const [recoveryTarget] = targets.splice(recoveryTargetIndex, 1);
+    targets.unshift(recoveryTarget!);
   }
 }
 

@@ -7,6 +7,7 @@ import {
   type GroundingSupport,
 } from "@google/genai";
 import { z } from "zod";
+import { recordGeminiResponse } from "./gemini-usage.js";
 import {
   SurgicalModuleSourceSchema,
   type SurgicalModuleRecoveryContext,
@@ -133,7 +134,7 @@ export class GeminiWorkflowAI implements WorkflowAI {
   }
 
   async clarify(prompt: string, profile: UserPreferenceProfile): Promise<ClarificationTurn> {
-    const result = await this.ai.models.generateContent({
+    const result = await this.generateContent({
       model: this.config.GEMINI_PLANNER_MODEL,
       contents: `${SURGICAL_ANATOMY_MANDATE}
 
@@ -159,7 +160,7 @@ Ask 1-4 concise, high-information questions. Prioritize anatomy region and later
     additionalContext: string,
     profile: UserPreferenceProfile,
   ): Promise<IntentAndAgenda> {
-    const result = await this.ai.models.generateContent({
+    const result = await this.generateContent({
       model: this.config.GEMINI_PLANNER_MODEL,
       contents: `${SURGICAL_ANATOMY_MANDATE}
 
@@ -193,7 +194,7 @@ Make the intent explicit about anatomy region, laterality, procedure/clinical fo
     // A demanding responseJsonSchema suppresses tool use: the model answers from
     // parametric knowledge and never issues a search, so grounding comes back empty.
     // Ground in free text first, then convert that grounded prose into the contract.
-    const grounded = await this.ai.models.generateContent({
+    const grounded = await this.generateContent({
       model: this.config.GEMINI_RESEARCH_MODEL,
       contents: `${SURGICAL_ANATOMY_MANDATE}
 
@@ -219,7 +220,7 @@ Requirements:
     const groundedSourceList = (grounding?.groundingChunks ?? [])
       .flatMap((chunk) => (chunk.web?.uri ? [`- ${chunk.web.title || "source"}: ${chunk.web.uri}`] : []))
       .join("\n");
-    const structured = await this.ai.models.generateContent({
+    const structured = await this.generateContent({
       model: this.config.GEMINI_RESEARCH_MODEL,
       contents: `${SURGICAL_ANATOMY_MANDATE}
 
@@ -249,7 +250,7 @@ ${grounded.text ?? ""}`,
   }
 
   async researchReferences(intent: IntentFrame, agenda: ResearchAgenda): Promise<ReferenceDiscovery> {
-    const result = await this.ai.models.generateContent({
+    const result = await this.generateContent({
       model: this.config.GEMINI_REFERENCE_MODEL,
       contents: `${SURGICAL_ANATOMY_MANDATE}
 
@@ -282,7 +283,7 @@ Research agenda: ${JSON.stringify(agenda)}`,
     const citableUrls = uniqueBy(perspectives.flatMap((result) => result.sources), (source) => source.url)
       .map((source) => `- ${source.title}: ${source.url}`)
       .join("\n");
-    const result = await this.ai.models.generateContent({
+    const result = await this.generateContent({
       model: this.config.GEMINI_PLANNER_MODEL,
       contents: `${SURGICAL_ANATOMY_MANDATE}
 
@@ -306,7 +307,7 @@ Create one object study for every required anatomical structure, pathology, inst
   }
 
   async research(prompt: string): Promise<ResearchBrief> {
-    const grounded = await this.ai.models.generateContent({
+    const grounded = await this.generateContent({
       model: this.config.GEMINI_RESEARCH_MODEL,
       contents: `${SURGICAL_ANATOMY_MANDATE}
 
@@ -317,7 +318,7 @@ Use grounded web search. Focus on label-independent anatomical identity, lateral
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
-    const structured = await this.ai.models.generateContent({
+    const structured = await this.generateContent({
       model: this.config.GEMINI_RESEARCH_MODEL,
       contents: `${SURGICAL_ANATOMY_MANDATE}
 
@@ -383,9 +384,10 @@ Views that passed on the previous source: ${JSON.stringify(recovery.passedTarget
 Issue: ${recovery.issue}
 Visible evidence: ${recovery.evidence}
 Failed criteria: ${JSON.stringify(recovery.failedCriteria)}
+Runtime renderer evidence (when present, this is exact browser evidence rather than a visual-QA opinion): ${JSON.stringify(recovery.rendererEvidence ?? null)}
 Previous definition and source: ${JSON.stringify(recovery.previous)}
 
-Correct the actual construction and camera responsible for the visible failure. Treat the previous source as the source of truth: preserve its accurate geometry, definition, step/view IDs, cameras, placements, and every previously passed view byte-for-byte wherever possible. Make the smallest coherent source change that fixes the cited pixels. Broader reconstruction is allowed only when the failed criteria explicitly identify a cross-scene anatomical construction defect. Do not paper over missing geometry with a label, color, or explanation.` : ""}
+Correct the actual construction and camera responsible for the visible failure. When runtime renderer evidence is present, fix the named JavaScript/React/Three error or readiness condition first; do not hide it with labels, delays, error swallowing, or a non-rendering fallback. Treat the previous source as the source of truth: preserve its accurate geometry, definition, step/view IDs, cameras, placements, and every previously passed view byte-for-byte wherever possible. Make the smallest coherent source change that fixes the cited pixels or runtime failure. Broader reconstruction is allowed only when the failed criteria explicitly identify a cross-scene anatomical construction defect. Do not paper over missing geometry with a label, color, or explanation.` : ""}
 
 The returned source is procedure-specific scene code. A trusted host supplies the Canvas, camera controls, lighting, operating room, UI, and active step. Export one default React component with this exact signature:
 
@@ -447,7 +449,7 @@ Construction requirements:
 - The source must be self-contained, deterministic, compile as TSX, and normally be 7,000-100,000 characters. No placeholders, TODOs, fake anatomy, remote calls, hidden fallbacks, or fixed procedure-scene aggregate.
 ${referenceImages.length > 0 ? `
 Approved reference images follow. Use them to reconstruct silhouette, topology, branching, tissue planes, relative scale, exposure, and operative viewpoint. Do not trace a single view blindly; resolve it through the approved dossier and preserve stated variation.` : ""}`;
-    const result = await this.ai.models.generateContent({
+    const result = await this.generateContent({
       model: this.config.GEMINI_PLANNER_MODEL,
       contents: [{
         role: "user",
@@ -505,7 +507,7 @@ Approved reference images follow. Use them to reconstruct silhouette, topology, 
       intentCoverage: context?.intentCoverage ?? [],
       contradictions: context?.contradictions ?? [],
     };
-    const result = await this.ai.models.generateContent({
+    const result = await this.generateContent({
       model: this.config.GEMINI_INSPECTOR_MODEL,
       contents: [
         {
@@ -545,6 +547,12 @@ Manifest: ${JSON.stringify(manifest)} Placement evidence: ${JSON.stringify(spati
       },
     });
     return InspectionSchema.parse(parseJsonResponse(result.text));
+  }
+
+  private generateContent(
+    params: Parameters<GoogleGenAI["models"]["generateContent"]>[0],
+  ) {
+    return recordGeminiResponse(() => this.ai.models.generateContent(params));
   }
 }
 

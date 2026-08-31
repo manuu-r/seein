@@ -210,6 +210,10 @@ export const QualitySupervisorStateSchema = z.object({
   targetedResearchRounds: z.number().int().nonnegative(),
   replans: z.number().int().nonnegative(),
   logicalAiCalls: z.number().int().nonnegative(),
+  // Renderer recovery is separately bounded because it can happen before any
+  // visual inspection has a screenshot to score.
+  renderRecoveries: z.number().int().nonnegative().default(0),
+  recentRenderFailureFingerprints: z.array(z.string().length(64)).max(12).default([]),
   currentRevision: z.number().int().positive(),
   currentTargetId: z.string().min(1).optional(),
   passedTargetIds: z.array(z.string()),

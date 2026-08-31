@@ -1,6 +1,6 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, useProgress } from "@react-three/drei";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Component, Suspense, type ErrorInfo, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OperatingRoom } from "./OperatingRoom";
 import { DEFAULT_OPERATING_ROOM_STATE } from "./OperatingRoomState";
@@ -17,7 +17,11 @@ declare global {
       stableFrames: number;
       stateId: string;
       viewId: string;
+      sceneMounted: boolean;
+      assetProgress: number;
+      failure?: string;
     };
+    __SEEIN_RENDER_FAILURE__?: string;
   }
 }
 
@@ -74,6 +78,8 @@ function ReadinessProbe({ sceneMounted }: { sceneMounted: boolean }) {
     if (!window.__SEEIN_RENDER_STATE__) return;
     window.__SEEIN_RENDER_STATE__.assetsLoaded = sceneMounted && !progress.active;
     window.__SEEIN_RENDER_STATE__.moduleCompiled = true;
+    window.__SEEIN_RENDER_STATE__.sceneMounted = sceneMounted;
+    window.__SEEIN_RENDER_STATE__.assetProgress = progress.progress;
     if (sceneMounted && window.__SEEIN_RENDER_STATE__.cameraSettled && !progress.active) {
       window.__SEEIN_RENDER_STATE__.stableFrames += 1;
       if (window.__SEEIN_RENDER_STATE__.stableFrames >= 3 && !window.__SEEIN_READY__) {
@@ -85,6 +91,26 @@ function ReadinessProbe({ sceneMounted }: { sceneMounted: boolean }) {
     }
   });
   return null;
+}
+
+class SceneErrorBoundary extends Component<{
+  children: ReactNode;
+  onError(message: string): void;
+}, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    const componentStack = info.componentStack?.trim();
+    this.props.onError(componentStack ? `${error.message}\n${componentStack}` : error.message);
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? null : this.props.children;
+  }
 }
 
 function SceneMountedProbe({ onMounted }: { onMounted(): void }) {
@@ -117,6 +143,18 @@ export function AtlasModuleHost({
   const [showStepDetails, setShowStepDetails] = useState(false);
   const [sceneMounted, setSceneMounted] = useState(false);
   const markSceneMounted = useMemo(() => () => setSceneMounted(true), []);
+  const reportSceneFailure = useMemo(() => (message: string) => {
+    const normalized = message.slice(0, 4_000);
+    if (!window.__SEEIN_ERRORS__?.includes(normalized)) window.__SEEIN_ERRORS__?.push(normalized);
+    window.__SEEIN_RENDER_FAILURE__ = normalized;
+    if (window.__SEEIN_RENDER_STATE__) window.__SEEIN_RENDER_STATE__.failure = normalized;
+    window.parent.postMessage({
+      type: "seein-module-failed",
+      error: normalized,
+      errors: window.__SEEIN_ERRORS__ ?? [],
+      renderState: window.__SEEIN_RENDER_STATE__,
+    }, "*");
+  }, []);
   const step = definition.steps.find((candidate) => candidate.id === stepId) ?? definition.steps[0]!;
 
   const chooseStep = (nextId: string) => {
@@ -150,8 +188,10 @@ export function AtlasModuleHost({
         <directionalLight position={[-8, -2, 7]} intensity={1.25} color="#bcdad8" />
         <Suspense fallback={null}>
           {definition.showOperatingRoom && <OperatingRoom state={DEFAULT_OPERATING_ROOM_STATE} />}
-          <Scene activeStepId={stepId} showLabels={showLabels} transparentPatient={transparentPatient} />
-          <SceneMountedProbe onMounted={markSceneMounted} />
+          <SceneErrorBoundary onError={reportSceneFailure}>
+            <Scene activeStepId={stepId} showLabels={showLabels} transparentPatient={transparentPatient} />
+            <SceneMountedProbe onMounted={markSceneMounted} />
+          </SceneErrorBoundary>
         </Suspense>
         <CameraRig definition={definition} stepId={stepId} viewId={requestedView} />
         <ReadinessProbe sceneMounted={sceneMounted} />

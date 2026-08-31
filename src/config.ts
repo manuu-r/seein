@@ -61,6 +61,14 @@ const ConfigSchema = z.object({
   // explicit run-policy choice (for example 240 minutes), not the default.
   WORKFLOW_MAX_RUNTIME_MINUTES: z.coerce.number().int().min(1).max(360).default(30),
   WORKFLOW_MAX_LOGICAL_AI_CALLS: z.coerce.number().int().min(4).max(1000).default(240),
+  // This covers all successful Gemini responses for one project, including
+  // clarification, research, generation, retries, and visual QA. It is high
+  // enough for a detailed multimodal module while preventing a stalled project
+  // from spending indefinitely.
+  WORKFLOW_MAX_GEMINI_TOKENS_PER_PROJECT: z.coerce.number().int().min(100_000).max(20_000_000).default(2_000_000),
+  // A browser/runtime failure can request a source repair, but never more than
+  // this many times independently of the broader QA action/time budgets.
+  WORKFLOW_MAX_RENDER_RECOVERIES: z.coerce.number().int().min(0).max(6).default(2),
   WORKFLOW_STALL_WINDOW: z.coerce.number().int().min(2).max(12).default(3),
   WORKFLOW_MIN_QUALITY_DELTA: z.coerce.number().min(0).max(0.25).default(0.015),
   WORKFLOW_MIN_RECOGNIZABILITY: z.coerce.number().min(0).max(1).default(0.82),

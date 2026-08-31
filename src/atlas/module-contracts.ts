@@ -117,6 +117,25 @@ export const CompiledSurgicalModuleSchema = z.object({
 });
 export type CompiledSurgicalModule = z.infer<typeof CompiledSurgicalModuleSchema>;
 
+export interface SurgicalModuleRendererEvidence {
+  phase: string;
+  summary: string;
+  browserErrors: string[];
+  moduleFrame?: {
+    url: string;
+    errors: string[];
+    renderState?: Record<string, unknown>;
+    documentReadyState?: string;
+    rootChildCount?: number;
+    canvasCount?: number;
+  };
+  failedRequests: Array<{
+    url: string;
+    status?: number;
+    failure?: string;
+  }>;
+}
+
 export interface SurgicalModuleRecoveryContext {
   attempt: number;
   failedViewId: string;
@@ -126,4 +145,5 @@ export interface SurgicalModuleRecoveryContext {
   evidence: string;
   failedCriteria: string[];
   previous: SurgicalModuleSource;
+  rendererEvidence?: SurgicalModuleRendererEvidence;
 }

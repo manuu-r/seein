@@ -57,7 +57,7 @@ html {
 }
 canvas { display: block; }
 
-.mono, .readout, .now__progress, .now__elapsed, .run__state, .wordmark,
+.mono, .readout, .now__progress, .now__tokens, .now__elapsed, .run__state, .wordmark,
 .launcher__kbd, .ledger__index, .activity__time { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
 .wordmark {
@@ -222,7 +222,18 @@ canvas { display: block; }
 /* What is happening, right now. The only thing shown by default. */
 .now { display: grid; gap: 8px; }
 .now__label { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 0; }
+.now__telemetry { display: inline-flex; align-items: baseline; justify-content: flex-end; gap: 8px; min-width: 0; }
 .now__progress { color: var(--bone-400); font-size: 10.5px; letter-spacing: 0.06em; }
+.now__tokens {
+  max-width: 175px;
+  overflow: hidden;
+  color: var(--bone-300);
+  font-size: 10px;
+  letter-spacing: 0.015em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.now__tokens[hidden] { display: none; }
 .now__elapsed { color: var(--bone-400); font-size: 10.5px; }
 .now__elapsed[hidden] { display: none; }
 .now__node { margin: 0; font-size: 19px; font-weight: 480; letter-spacing: -0.02em; line-height: 1.2; }
@@ -241,18 +252,45 @@ canvas { display: block; }
 .now__operation[data-phase="completed"] { border-left-color: var(--pass); }
 .now__operation[data-phase="retrying"] { border-left-color: var(--warn); }
 .now__operation[data-phase="failed"] { border-left-color: var(--fail); }
+.now__operation-head, .step__head { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .now__operation-label { margin: 0; color: var(--bone-100); font-size: 12.5px; font-weight: 550; line-height: 1.4; }
-.now__operation-route,
+.now__operation-route {
+  margin: 0;
+  color: var(--bone-400);
+  font-size: 11.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
 .now__operation-detail {
   margin: 0;
   color: var(--bone-400);
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: 10px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 .now__operation[data-phase="retrying"] .now__operation-detail { color: var(--warn); }
 .now__operation[data-phase="failed"] .now__operation-detail { color: var(--fail); }
+
+.status-badge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 17px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 999px;
+  padding: 1px 5px;
+  color: var(--bone-400);
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1;
+}
+.status-badge[data-tone="success"] { border-color: color-mix(in srgb, var(--pass) 44%, transparent); color: var(--pass); }
+.status-badge[data-tone="warning"] { border-color: color-mix(in srgb, var(--warn) 44%, transparent); color: var(--warn); }
+.status-badge[data-tone="error"] { border-color: color-mix(in srgb, var(--fail) 44%, transparent); color: var(--fail); }
+.status-badge[data-tone="info"] { color: var(--bone-300); }
 
 /* A run in flight breathes, so working never looks like hung. */
 .now[data-working="true"] .now__node::after {
@@ -378,6 +416,9 @@ button.act:active:not(:disabled) { transform: translateY(1px); }
   color: var(--bone-200); background: var(--ink-100);
   font-family: var(--mono); font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere;
 }
+.failure-card { gap: 9px; }
+.failure-card > .status-badge { justify-self: start; }
+.failure__summary { margin: 0; color: var(--bone-200); font-size: 12.5px; line-height: 1.5; }
 .error-text { margin: 0; color: var(--fail); font-size: 12.5px; line-height: 1.45; }
 
 .checkpoints { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; min-width: 0; }
@@ -455,6 +496,7 @@ button.act:active:not(:disabled) { transform: translateY(1px); }
 .step[data-status="retrying"]::before { border-color: var(--warn); background: var(--warn); }
 .step[data-status="started"]::before { border-color: var(--bone-100); animation: breathe 1.8s var(--ease) infinite; }
 .step__what { color: var(--bone-200); font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.step__detail { margin-top: 2px; color: var(--bone-400); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; }
 .step[data-status="failed"] .step__what { color: var(--fail); }
 .step[data-status="retrying"] .step__what { color: var(--warn); }
 .step__meta { margin-top: 2px; color: var(--bone-400); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }

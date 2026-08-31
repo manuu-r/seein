@@ -152,9 +152,18 @@ window.__SEEIN_RENDER_STATE__ = {
   stableFrames: 0,
   stateId: "",
   viewId: "",
+  sceneMounted: false,
+  assetProgress: 0,
 };
-window.addEventListener("error", (event) => window.__SEEIN_ERRORS__?.push(event.message));
-window.addEventListener("unhandledrejection", (event) => window.__SEEIN_ERRORS__?.push(String(event.reason)));
+const reportGlobalModuleFailure = (value: unknown) => {
+  const message = value instanceof Error ? value.message : String(value);
+  if (!window.__SEEIN_ERRORS__?.includes(message)) window.__SEEIN_ERRORS__?.push(message);
+  window.__SEEIN_RENDER_FAILURE__ = message;
+  if (window.__SEEIN_RENDER_STATE__) window.__SEEIN_RENDER_STATE__.failure = message;
+  window.parent.postMessage({ type: "seein-module-failed", error: message, errors: window.__SEEIN_ERRORS__, renderState: window.__SEEIN_RENDER_STATE__ }, "*");
+};
+window.addEventListener("error", (event) => reportGlobalModuleFailure(event.error ?? event.message));
+window.addEventListener("unhandledrejection", (event) => reportGlobalModuleFailure(event.reason));
 
 const definition = ${JSON.stringify(definition)};
 createRoot(document.getElementById("root")).render(

@@ -104,12 +104,18 @@
           <section class="now">
             <p class="now__label">
               <span id="workflow-progress" class="now__progress"></span>
-              <span id="workflow-elapsed" class="now__elapsed" hidden></span>
+              <span class="now__telemetry">
+                <span id="workflow-tokens" class="now__tokens" hidden></span>
+                <span id="workflow-elapsed" class="now__elapsed" hidden></span>
+              </span>
             </p>
             <h2 id="workflow-node" class="now__node">Preparing</h2>
             <p id="workflow-guidance" class="now__guidance"></p>
             <div id="workflow-operation" class="now__operation" hidden>
-              <p id="workflow-operation-label" class="now__operation-label"></p>
+              <div class="now__operation-head">
+                <span id="workflow-operation-badge" class="status-badge"></span>
+                <p id="workflow-operation-label" class="now__operation-label"></p>
+              </div>
               <p id="workflow-operation-route" class="now__operation-route"></p>
               <p id="workflow-operation-detail" class="now__operation-detail"></p>
             </div>

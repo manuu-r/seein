@@ -1,4 +1,10 @@
-export {};
+import {
+  formatGeminiUsage,
+  operationPresentation,
+  summarizeGeminiUsage,
+  workflowFailurePresentation,
+  type WorkflowTone,
+} from "./workflow-presentation";
 
 interface Manifest {
   title: string;
@@ -139,7 +145,11 @@ declare global {
       stableFrames: number;
       stateId: string;
       viewId: string;
+      sceneMounted: boolean;
+      assetProgress: number;
+      failure?: string;
     };
+    __SEEIN_RENDER_FAILURE__?: string;
   }
 }
 
@@ -161,7 +171,9 @@ const flow = requiredElement("#flow");
 const modal = requiredElement("#modal") as HTMLDialogElement;
 const consoleStop = requiredElement("#console-stop");
 const workflowElapsed = requiredElement("#workflow-elapsed");
+const workflowTokens = requiredElement("#workflow-tokens");
 const workflowOperation = requiredElement("#workflow-operation");
+const workflowOperationBadge = requiredElement("#workflow-operation-badge");
 const workflowOperationLabel = requiredElement("#workflow-operation-label");
 const workflowOperationRoute = requiredElement("#workflow-operation-route");
 const workflowOperationDetail = requiredElement("#workflow-operation-detail");
@@ -197,22 +209,27 @@ window.__SEEIN_RENDER_STATE__ = {
   stableFrames: 0,
   stateId: "",
   viewId: "",
+  sceneMounted: false,
+  assetProgress: 0,
 };
 
 void start().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  window.__SEEIN_ERRORS__?.push(message);
+  recordViewerFailure(message);
   status.hidden = false;
   status.textContent = `Scene failed: ${message}`;
   status.style.color = "#fca5a5";
-  if (window.__SEEIN_RENDER_STATE__) {
-    window.__SEEIN_RENDER_STATE__.assetsLoaded = true;
-    window.__SEEIN_RENDER_STATE__.moduleCompiled = true;
-    window.__SEEIN_RENDER_STATE__.cameraSettled = true;
-    window.__SEEIN_RENDER_STATE__.stableFrames = 3;
-  }
+  // Ready wakes the screenshot driver, while __SEEIN_RENDER_FAILURE__ makes
+  // it fail immediately with the underlying module/browser evidence instead of
+  // waiting another minute for a condition that can never become true.
   window.__SEEIN_READY__ = true;
 });
+
+function recordViewerFailure(message: string): void {
+  if (!window.__SEEIN_ERRORS__?.includes(message)) window.__SEEIN_ERRORS__?.push(message);
+  window.__SEEIN_RENDER_FAILURE__ = message;
+  if (window.__SEEIN_RENDER_STATE__) window.__SEEIN_RENDER_STATE__.failure = message;
+}
 
 async function start(): Promise<void> {
   const query = new URLSearchParams(location.search);
@@ -439,10 +456,15 @@ async function renderAtlasModule(manifest: Manifest): Promise<void> {
     // for the child to report real frame stability.
     const deadline = Date.now() + 50_000;
     let settled = false;
+    let deadlineTimer: number | undefined;
+    const stopWaiting = (): void => {
+      window.removeEventListener("message", onMessage);
+      if (deadlineTimer !== undefined) window.clearTimeout(deadlineTimer);
+    };
     const finish = (childState?: Window["__SEEIN_RENDER_STATE__"], childErrors: string[] = []): void => {
       if (settled) return;
       settled = true;
-      window.removeEventListener("message", onMessage);
+      stopWaiting();
       window.__SEEIN_ERRORS__?.push(...childErrors);
       if (window.__SEEIN_RENDER_STATE__) {
         window.__SEEIN_RENDER_STATE__ = childState
@@ -454,19 +476,64 @@ async function renderAtlasModule(manifest: Manifest): Promise<void> {
               stableFrames: 3,
               stateId: stateId ?? "",
               viewId: viewId ?? "",
+              sceneMounted: true,
+              assetProgress: 100,
             };
       }
       resolve();
     };
+    const fail = (
+      message: string,
+      childState?: Window["__SEEIN_RENDER_STATE__"],
+      childErrors: string[] = [],
+    ): void => {
+      if (settled) return;
+      settled = true;
+      stopWaiting();
+      window.__SEEIN_ERRORS__?.push(...childErrors.filter((error) => !window.__SEEIN_ERRORS__?.includes(error)));
+      recordViewerFailure(message);
+      if (window.__SEEIN_RENDER_STATE__) {
+        window.__SEEIN_RENDER_STATE__ = {
+          ...(childState ?? window.__SEEIN_RENDER_STATE__),
+          failure: message,
+        };
+      }
+      reject(new Error(message));
+    };
     const onMessage = (event: MessageEvent): void => {
       if (event.source !== frame.contentWindow) return;
-      if ((event.data as { type?: string } | null)?.type === "seein-module-ready") finish();
+      const data = event.data as {
+        type?: string;
+        error?: string;
+        errors?: string[];
+        renderState?: Window["__SEEIN_RENDER_STATE__"];
+      } | null;
+      if (data?.type === "seein-module-ready") finish(data.renderState, data.errors ?? []);
+      if (data?.type === "seein-module-failed") {
+        fail(data.error ?? "Generated surgical module reported a runtime failure", data.renderState, data.errors ?? []);
+      }
     };
     window.addEventListener("message", onMessage);
+    const failForDeadline = (): void => {
+      if (settled) return;
+      let childState: Window["__SEEIN_RENDER_STATE__"] | undefined;
+      let childErrors: string[] = [];
+      try {
+        childState = frame.contentWindow?.__SEEIN_RENDER_STATE__;
+        childErrors = frame.contentWindow?.__SEEIN_ERRORS__ ?? [];
+      } catch {
+        // Cross-origin frames still provide the final browser-side snapshot.
+      }
+      fail("Generated surgical module did not reach render readiness within 50 seconds", childState, childErrors);
+    };
     const poll = () => {
       if (settled) return;
       try {
         const child = frame.contentWindow;
+        if (child?.__SEEIN_RENDER_FAILURE__) {
+          fail(child.__SEEIN_RENDER_FAILURE__, child.__SEEIN_RENDER_STATE__, child.__SEEIN_ERRORS__ ?? []);
+          return;
+        }
         if (child?.__SEEIN_READY__) {
           finish(child.__SEEIN_RENDER_STATE__, child.__SEEIN_ERRORS__ ?? []);
           return;
@@ -477,14 +544,14 @@ async function renderAtlasModule(manifest: Manifest): Promise<void> {
         // origin boundary, so keep waiting instead of treating it as a scene error.
       }
       if (Date.now() >= deadline) {
-        window.removeEventListener("message", onMessage);
-        reject(new Error("Generated surgical module did not reach render readiness within 50 seconds"));
+        failForDeadline();
         return;
       }
-      requestAnimationFrame(poll);
+      window.setTimeout(poll, 100);
     };
-    frame.addEventListener("error", () => reject(new Error("Generated surgical module iframe failed to load")), { once: true });
-    requestAnimationFrame(poll);
+    frame.addEventListener("error", () => fail("Generated surgical module iframe failed to load"), { once: true });
+    deadlineTimer = window.setTimeout(failForDeadline, 50_000);
+    window.setTimeout(poll, 0);
   });
 
   status.textContent = window.__SEEIN_ERRORS__?.length
@@ -630,7 +697,7 @@ function storyDetail(stage: string, detail: Record<string, unknown> | undefined)
   if (typeof detail.verdict === "string") {
     bits.push(detail.verdict === "pass" ? "anatomy view passes" : `requires a change to ${String(detail.category ?? "the anatomy")}`);
   }
-  if (typeof detail.error === "string") bits.push(firstUsefulLine(detail.error));
+  if (typeof detail.error === "string") bits.push(workflowFailurePresentation(detail.error).description);
   if (bits.length === 0 && detail.cacheHit === true) bits.push("reused from an earlier run");
   return bits.slice(0, 2).join(" · ");
 }
@@ -639,38 +706,26 @@ function operationPhase(event: ProjectEvent): string {
   return typeof event.detail?.phase === "string" ? event.detail.phase : "started";
 }
 
-function operationHeadline(row: ActivityRow): string {
-  const label = typeof row.detail?.label === "string" ? row.detail.label : row.message ?? "External call";
-  if (row.status === "completed") return `${label} completed`;
-  if (row.status === "retrying") return `${label} failed — retry scheduled`;
-  if (row.status === "failed") return `${label} failed`;
-  return `Calling ${label}`;
+function operationLabel(row: ActivityRow): string {
+  return typeof row.detail?.label === "string" ? row.detail.label : row.message ?? "External call";
 }
 
-function durationLabel(value: unknown): string {
-  if (typeof value !== "number") return "";
-  if (value < 1000) return `${Math.round(value)} ms`;
-  if (value < 60_000) return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)} s`;
-  return `${Math.floor(value / 60_000)}m ${Math.round((value % 60_000) / 1000)}s`;
+function statusBadge(status: string): { label: "INFO" | "DONE" | "RETRY" | "ERROR"; tone: WorkflowTone } {
+  if (status === "completed") return { label: "DONE", tone: "success" };
+  if (status === "retrying") return { label: "RETRY", tone: "warning" };
+  if (status === "failed") return { label: "ERROR", tone: "error" };
+  return { label: "INFO", tone: "info" };
 }
 
-function operationMeta(detail: Record<string, unknown> | undefined, includeRoute = true): string {
-  if (!detail) return "";
-  const bits: string[] = [];
-  if (includeRoute && typeof detail.action === "string" && typeof detail.destination === "string") {
-    bits.push(`${detail.action} → ${detail.destination}`);
-  } else if (includeRoute && typeof detail.destination === "string") {
-    bits.push(detail.destination);
+function renderGeminiUsage(rows: ActivityRow[]): void {
+  const usage = summarizeGeminiUsage(rows.map((row) => row.detail));
+  if (!usage) {
+    workflowTokens.hidden = true;
+    return;
   }
-  if (typeof detail.provider === "string") bits.push(detail.provider);
-  if (typeof detail.attempt === "number") {
-    bits.push(`attempt ${detail.attempt}/${typeof detail.maxAttempts === "number" ? detail.maxAttempts : "?"}`);
-  }
-  const duration = durationLabel(detail.totalDurationMs ?? detail.durationMs);
-  if (duration) bits.push(duration);
-  if (typeof detail.retryInMs === "number") bits.push(`retry in ${durationLabel(detail.retryInMs)}`);
-  if (typeof detail.error === "string") bits.push(firstUsefulLine(detail.error));
-  return bits.join(" · ");
+  workflowTokens.hidden = false;
+  workflowTokens.textContent = formatGeminiUsage(usage);
+  workflowTokens.title = `${usage.responses} Gemini response${usage.responses === 1 ? "" : "s"} metered for this project`;
 }
 
 function renderLiveOperation(rows: ActivityRow[]): void {
@@ -682,11 +737,13 @@ function renderLiveOperation(rows: ActivityRow[]): void {
   }
   workflowOperation.hidden = false;
   workflowOperation.dataset.phase = current.status;
-  workflowOperationLabel.textContent = operationHeadline(current);
-  const action = typeof current.detail?.action === "string" ? current.detail.action : "External operation";
-  const destination = typeof current.detail?.destination === "string" ? current.detail.destination : "provider";
-  workflowOperationRoute.textContent = `${action} → ${destination}`;
-  workflowOperationDetail.textContent = operationMeta(current.detail, false);
+  const presentation = operationPresentation(current.status, operationLabel(current), current.detail);
+  workflowOperation.dataset.tone = presentation.tone;
+  workflowOperationBadge.textContent = presentation.badge;
+  workflowOperationBadge.dataset.tone = presentation.tone;
+  workflowOperationLabel.textContent = presentation.headline;
+  workflowOperationRoute.textContent = presentation.description;
+  workflowOperationDetail.textContent = presentation.metadata.join(" · ");
 }
 
 function relativeTime(iso: string | undefined, now: number): string {
@@ -696,15 +753,6 @@ function relativeTime(iso: string | undefined, now: number): string {
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
   return `${Math.round(seconds / 3600)} hr ago`;
-}
-
-// Stringified errors often start with a bare "ZodError: [", which tells the reader
-// nothing. Prefer the first line that carries an actual message.
-function firstUsefulLine(text: string): string {
-  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
-  const message = lines.find((line) => /"message"\s*:/.test(line)) ?? lines.find((line) => line.length > 24);
-  const cleaned = (message ?? lines[0] ?? text).replace(/^"message"\s*:\s*"?/, "").replace(/",?$/, "");
-  return cleaned.slice(0, 110);
 }
 
 async function renderActivity(projectId: string): Promise<void> {
@@ -754,6 +802,7 @@ async function renderActivity(projectId: string): Promise<void> {
   const now = Date.now();
   const rows = [...stages.values(), ...operations.values()]
     .sort((a, b) => (b.at ?? "").localeCompare(a.at ?? ""));
+  renderGeminiUsage(rows);
   renderLiveOperation(rows);
   if (rows.length === 0) return;
   activityList.replaceChildren(
@@ -761,17 +810,35 @@ async function renderActivity(projectId: string): Promise<void> {
       const item = document.createElement("li");
       item.className = "step";
       item.dataset.status = row.status;
+      const operation = row.kind === "operation"
+        ? operationPresentation(row.status, operationLabel(row), row.detail)
+        : undefined;
+      const stageBadge = statusBadge(row.status);
+      const badge = operation
+        ? { label: operation.badge, tone: operation.tone }
+        : stageBadge;
+      item.dataset.tone = badge.tone;
+      const head = document.createElement("div");
+      head.className = "step__head";
+      const pill = document.createElement("span");
+      pill.className = "status-badge";
+      pill.dataset.tone = badge.tone;
+      pill.textContent = badge.label;
       const headline = document.createElement("div");
       headline.className = "step__what";
-      headline.textContent = row.kind === "operation" ? operationHeadline(row) : storyFor(row.stage, row.status);
+      headline.textContent = operation?.headline ?? storyFor(row.stage, row.status);
+      head.append(pill, headline);
+      const description = document.createElement("div");
+      description.className = "step__detail";
+      description.textContent = operation?.description ?? storyDetail(row.stage, row.detail);
       const meta = document.createElement("div");
       meta.className = "step__meta";
-      const detail = row.kind === "operation" ? operationMeta(row.detail) : storyDetail(row.stage, row.detail);
       const took = row.startedAt && row.at && row.status !== "started"
         ? `${Math.max(1, Math.round((Date.parse(row.at) - Date.parse(row.startedAt)) / 1000))}s`
         : "";
-      meta.textContent = [detail, took, relativeTime(row.at, now)].filter(Boolean).join(" · ");
-      item.append(headline);
+      meta.textContent = [...(operation?.metadata ?? []), took, relativeTime(row.at, now)].filter(Boolean).join(" · ");
+      item.append(head);
+      if (description.textContent) item.append(description);
       if (meta.textContent) item.append(meta);
       return item;
     }),
@@ -1578,16 +1645,21 @@ function renderWorkflowAction(
 
   if (state.status === "failed") {
     const card = document.createElement("div");
-    card.className = "card";
+    card.className = "card failure-card";
+    const statusLabel = document.createElement("span");
+    statusLabel.className = "status-badge";
+    statusLabel.dataset.tone = "error";
+    statusLabel.textContent = "ERROR";
     const heading = document.createElement("h2");
     heading.textContent = state.failedNode
       ? `Stopped at ${humanize(state.failedNode)}`
       : "The run stopped";
-    card.append(heading);
+    card.append(statusLabel, heading);
     if (state.failureMessage) {
-      const detail = document.createElement("pre");
-      detail.className = "failure";
-      detail.textContent = state.failureMessage.split("\n").slice(0, 6).join("\n");
+      const explanation = workflowFailurePresentation(state.failureMessage);
+      const detail = document.createElement("p");
+      detail.className = "failure__summary";
+      detail.textContent = explanation.description;
       card.append(detail);
     }
     const hint = document.createElement("p");
