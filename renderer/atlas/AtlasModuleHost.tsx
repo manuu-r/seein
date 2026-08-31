@@ -6,6 +6,42 @@ import { OperatingRoom } from "./OperatingRoom";
 import { DEFAULT_OPERATING_ROOM_STATE } from "./OperatingRoomState";
 import type { SurgicalModuleDefinition, SurgicalSceneComponent } from "./types";
 
+export type AtlasRenderProfile = {
+  showOperatingRoom: boolean;
+  shadows: boolean;
+  dpr: number | [number, number];
+  antialias: boolean;
+  preserveDrawingBuffer: boolean;
+};
+
+/**
+ * Headless Chromium on GPU-less workers renders WebGL through SwiftShader.
+ * Keep the complete patient/anatomy coordinate system for QA, but omit the
+ * decorative operating-room environment and expensive raster features that do
+ * not affect anatomical placement. Interactive browser rendering is unchanged.
+ */
+export function resolveAtlasRenderProfile(
+  qaMode: boolean,
+  showOperatingRoom: boolean,
+): AtlasRenderProfile {
+  if (qaMode) {
+    return {
+      showOperatingRoom: false,
+      shadows: false,
+      dpr: 1,
+      antialias: false,
+      preserveDrawingBuffer: false,
+    };
+  }
+  return {
+    showOperatingRoom,
+    shadows: true,
+    dpr: [1, 1.5],
+    antialias: true,
+    preserveDrawingBuffer: true,
+  };
+}
+
 declare global {
   interface Window {
     __SEEIN_READY__?: boolean;
@@ -98,7 +134,7 @@ function ReadinessProbe({ sceneMounted, qaMode }: { sceneMounted: boolean; qaMod
       window.__SEEIN_RENDER_STATE__.stableFrames = 0;
     }
     // QA only needs a deterministic settled frame set. Demand rendering keeps
-    // the exact scene/materials while avoiding an endless software-WebGL loop.
+    // the complete anatomical geometry while avoiding an endless software-WebGL loop.
     if (qaMode && !window.__SEEIN_READY__ && sceneMounted && !progress.active) invalidate();
   });
   return null;
@@ -138,6 +174,10 @@ export function AtlasModuleHost({
 }) {
   const query = useMemo(() => new URLSearchParams(window.location.search), []);
   const qaMode = query.get("qa") === "1";
+  const renderProfile = useMemo(
+    () => resolveAtlasRenderProfile(qaMode, definition.showOperatingRoom),
+    [definition.showOperatingRoom, qaMode],
+  );
   const requestedView = query.get("view") ?? "";
   const requestedStep = query.get("state")
     ?? definition.qaViews.find((view) => view.id === requestedView)?.stepId
@@ -181,11 +221,16 @@ export function AtlasModuleHost({
     <main className="atlas-shell" style={{ background: definition.background }}>
       <style>{ATLAS_UI_STYLES}</style>
       <Canvas
-        shadows
-        dpr={[1, 1.5]}
+        shadows={renderProfile.shadows}
+        dpr={renderProfile.dpr}
         frameloop={qaMode ? "demand" : "always"}
         camera={{ position: [...step.camera.position], fov: step.camera.fov, near: 0.05, far: 100 }}
-        gl={{ antialias: true, alpha: false, powerPreference: "high-performance", preserveDrawingBuffer: true }}
+        gl={{
+          antialias: renderProfile.antialias,
+          alpha: false,
+          powerPreference: "high-performance",
+          preserveDrawingBuffer: renderProfile.preserveDrawingBuffer,
+        }}
         onCreated={({ gl }) => {
           gl.outputColorSpace = THREE.SRGBColorSpace;
           gl.toneMapping = THREE.ACESFilmicToneMapping;
@@ -196,10 +241,18 @@ export function AtlasModuleHost({
         <fog attach="fog" args={[definition.background, 24, 52]} />
         <ambientLight intensity={0.42} />
         <hemisphereLight args={["#fff1df", "#163237", 0.65]} />
-        <spotLight position={[2, 8, 12]} intensity={3.1} angle={0.52} penumbra={0.78} color="#fff0dc" castShadow shadow-mapSize={[1024, 1024]} />
+        <spotLight
+          position={[2, 8, 12]}
+          intensity={3.1}
+          angle={0.52}
+          penumbra={0.78}
+          color="#fff0dc"
+          castShadow={renderProfile.shadows}
+          shadow-mapSize={[1024, 1024]}
+        />
         <directionalLight position={[-8, -2, 7]} intensity={1.25} color="#bcdad8" />
         <Suspense fallback={null}>
-          {definition.showOperatingRoom && <OperatingRoom state={DEFAULT_OPERATING_ROOM_STATE} />}
+          {renderProfile.showOperatingRoom && <OperatingRoom state={DEFAULT_OPERATING_ROOM_STATE} />}
           <SceneErrorBoundary onError={reportSceneFailure}>
             <Scene activeStepId={stepId} showLabels={showLabels} transparentPatient={transparentPatient} />
             <SceneMountedProbe onMounted={markSceneMounted} />

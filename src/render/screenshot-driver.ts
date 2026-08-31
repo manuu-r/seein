@@ -86,7 +86,7 @@ export interface ScreenshotDriver {
 }
 
 export class PlaywrightScreenshotDriver implements ScreenshotDriver {
-  readonly identity = "playwright-chromium:diagnostic-readiness-v4";
+  readonly identity = "playwright-chromium:qa-profile-readiness-v5";
   private browserPromise: Promise<Browser> | null = null;
 
   constructor(private readonly config: Config) {}
@@ -97,6 +97,7 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
     const network: RenderNetworkDiagnostic[] = [];
     let phase: RendererDiagnosticPhase = "startup";
     let page: Page | undefined;
+    let discardBrowserAfterCapture = false;
     try {
       const browser = await this.getBrowser();
       const nextPage = await browser.newPage({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });
@@ -188,6 +189,9 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
       const diagnostics = page
         ? await collectRendererDiagnostics(page, viewerUrl, phase, consoleErrors, network)
         : startupDiagnostics(viewerUrl, error, consoleErrors, network);
+      const infrastructureFailure = isRendererInfrastructureFailure(diagnostics)
+        || (phase === "navigation" && diagnostics.frames.length <= 1 && diagnostics.network.length > 0);
+      discardBrowserAfterCapture = infrastructureFailure;
       if (page) {
         const failureScreenshotPath = await saveFailureScreenshot(page, outputPath);
         if (failureScreenshotPath) diagnostics.failureScreenshotPath = failureScreenshotPath;
@@ -203,8 +207,7 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
         // Chromium startup/new-page failures and pre-viewer transport failures
         // are infrastructure conditions. They receive one retry but never ask
         // Gemini to rewrite an otherwise unknown scene.
-        isRendererInfrastructureFailure(diagnostics)
-          || (phase === "navigation" && diagnostics.frames.length <= 1 && diagnostics.network.length > 0),
+        infrastructureFailure,
         error,
       );
     } finally {
@@ -215,6 +218,7 @@ export class PlaywrightScreenshotDriver implements ScreenshotDriver {
           await this.discardBrowser();
         }
       }
+      if (discardBrowserAfterCapture) await this.discardBrowser();
     }
   }
 
@@ -466,12 +470,18 @@ export function summarizeRendererDiagnostics(diagnostics: RendererDiagnostics): 
 }
 
 /**
- * Chromium could not launch or allocate a page, so no generated source was
- * observed. This is deliberately distinct from an in-page render failure:
- * callers may retry the renderer, but must not ask Gemini to revise a scene.
+ * Chromium could not launch/allocate a page, or every loaded frame stopped
+ * answering diagnostics before exposing render state. These conditions are
+ * deliberately distinct from an explicit module failure: callers may retry a
+ * fresh renderer once, but must not ask Gemini to revise unknown source.
  */
 export function isRendererInfrastructureFailure(diagnostics: RendererDiagnostics): boolean {
-  return diagnostics.phase === "startup";
+  if (diagnostics.phase === "startup") return true;
+  if (diagnostics.phase !== "outer-readiness" && diagnostics.phase !== "frame-stability") return false;
+  return diagnostics.frames.length > 0 && diagnostics.frames.every((frame) =>
+    frame.renderState === undefined
+    && frame.errors.some((message) => /frame diagnostic timed out/i.test(message))
+  );
 }
 
 function resolveChromiumPath(configured: string): string | undefined {

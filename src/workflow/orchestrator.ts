@@ -2112,7 +2112,8 @@ export class Orchestrator {
               ...(result.diagnostics ? { rendererDiagnostics: summarizeRendererDiagnostics(result.diagnostics) } : {}),
             }),
             // A source/runtime error is captured once with its actual browser
-            // state. Only a pre-viewer transport failure gets one retry.
+            // state. Browser startup, transport, or a wholly unresponsive
+            // renderer gets one bounded retry in a fresh Chromium process.
             maxAttempts: 2,
             shouldRetry: (error) => !(error instanceof ScreenshotCaptureError) || error.retryable,
           },

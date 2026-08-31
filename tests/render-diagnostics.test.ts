@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Frame, type Page } from "playwright";
 import { describe, expect, it } from "vitest";
 import {
   hasLargeDevShm,
@@ -25,6 +25,51 @@ class NewPageFailureDriver extends PlaywrightScreenshotDriver {
       newPage: async () => {
         throw new Error("browser.newPage: Target page, context or browser has been closed");
       },
+      close: async () => {
+        this.browserCloseCalls += 1;
+      },
+    } as unknown as Browser);
+  }
+}
+
+class UnresponsivePageDriver extends PlaywrightScreenshotDriver {
+  launcherCalls = 0;
+  browserCloseCalls = 0;
+  pageCloseCalls = 0;
+
+  protected override launchBrowser(_options: Parameters<typeof chromium.launch>[0]): Promise<Browser> {
+    this.launcherCalls += 1;
+    const mainFrame = {
+      evaluate: async () => {
+        throw new Error("Frame diagnostic timed out within 3 seconds");
+      },
+      url: () => "http://127.0.0.1:8787/viewer/?manifest=test",
+      parentFrame: () => null,
+    } as unknown as Frame;
+    const childFrame = {
+      evaluate: async () => {
+        throw new Error("Frame diagnostic timed out within 3 seconds");
+      },
+      url: () => "http://127.0.0.1:8787/artifacts/projects/p/module/revision-001/index.html?qa=1",
+      parentFrame: () => mainFrame,
+    } as unknown as Frame;
+    const page = {
+      on: () => page,
+      goto: async () => null,
+      waitForFunction: async () => {
+        throw new Error("Outer viewer did not reach render readiness within 60 seconds");
+      },
+      mainFrame: () => mainFrame,
+      frames: () => [mainFrame, childFrame],
+      screenshot: async () => {
+        throw new Error("Failure screenshot timed out within 5 seconds");
+      },
+      close: async () => {
+        this.pageCloseCalls += 1;
+      },
+    } as unknown as Page;
+    return Promise.resolve({
+      newPage: async () => page,
       close: async () => {
         this.browserCloseCalls += 1;
       },
@@ -113,6 +158,33 @@ describe("renderer diagnostics", () => {
     expect(canRepairRendererFailure(diagnostics)).toBe(false);
   });
 
+  it("treats an entirely unresponsive renderer as retryable infrastructure", () => {
+    const diagnostics: RendererDiagnostics = {
+      capturedAt: "2026-08-31T00:00:00.000Z",
+      viewerUrl: "http://127.0.0.1:8787/viewer/?manifest=test",
+      phase: "outer-readiness",
+      browserErrors: [],
+      frames: [
+        {
+          url: "http://127.0.0.1:8787/viewer/?manifest=test",
+          isMainFrame: true,
+          ready: false,
+          errors: ["Could not inspect frame: Frame diagnostic timed out within 3 seconds"],
+        },
+        {
+          url: "http://127.0.0.1:8787/artifacts/projects/p/module/revision-001/index.html?qa=1",
+          isMainFrame: false,
+          ready: false,
+          errors: ["Could not inspect frame: Frame diagnostic timed out within 3 seconds"],
+        },
+      ],
+      network: [],
+    };
+
+    expect(isRendererInfrastructureFailure(diagnostics)).toBe(true);
+    expect(canRepairRendererFailure(diagnostics)).toBe(false);
+  });
+
   it("allows a bounded source repair only for an explicit module runtime failure", () => {
     const diagnostics: RendererDiagnostics = {
       capturedAt: "2026-08-31T00:00:00.000Z",
@@ -177,6 +249,41 @@ describe("renderer diagnostics", () => {
       // A later provider retry starts a fresh Chromium process instead of
       // reusing the one that could not allocate a page.
       expect(driver.launcherCalls).toBe(2);
+      expect(driver.browserCloseCalls).toBe(2);
+    } finally {
+      await driver.close();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("discards an unresponsive browser before the bounded provider retry", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "seein-renderer-unresponsive-"));
+    const driver = new UnresponsivePageDriver({
+      PLAYWRIGHT_HEADLESS: true,
+      PLAYWRIGHT_EXECUTABLE_PATH: "",
+    } as Config);
+    const captureError = async (name: string): Promise<ScreenshotCaptureError> => {
+      try {
+        await driver.capture("http://127.0.0.1:8787/viewer/?manifest=test", path.join(directory, `${name}.png`));
+        throw new Error("Expected capture to fail");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ScreenshotCaptureError);
+        return error as ScreenshotCaptureError;
+      }
+    };
+
+    try {
+      const first = await captureError("first");
+      const second = await captureError("second");
+
+      for (const error of [first, second]) {
+        expect(error.retryable).toBe(true);
+        expect(error.diagnostics.phase).toBe("outer-readiness");
+        expect(isRendererInfrastructureFailure(error.diagnostics)).toBe(true);
+        expect(canRepairRendererFailure(error.diagnostics)).toBe(false);
+      }
+      expect(driver.launcherCalls).toBe(2);
+      expect(driver.pageCloseCalls).toBe(2);
       expect(driver.browserCloseCalls).toBe(2);
     } finally {
       await driver.close();
